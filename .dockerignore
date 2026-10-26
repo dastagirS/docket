@@ -1,0 +1,15 @@
+*
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+internal/docket/web/
+!frontend/
+!frontend/**
+frontend/node_modules/
+frontend/.vite/
+!docker/
+!docker/data/
+!docker/data/.keep
