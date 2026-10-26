@@ -2,6 +2,7 @@ package docket
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -63,7 +64,7 @@ func projectForTest(t *testing.T, fixture *fixture, key string) Project {
 	if err := json.Unmarshal(response.Body.Bytes(), &project); err != nil {
 		t.Fatal(err)
 	}
-	if project.ID <= 0 || len(project.Statuses) == 0 || project.Version != 1 {
+	if project.ID <= 0 || len(project.Statuses) == 0 || project.Version != 1 || project.Archived {
 		t.Fatalf("invalid created project: %+v", project)
 	}
 	return project
@@ -77,7 +78,7 @@ func ticketForTest(t *testing.T, fixture *fixture, projectID int64) Ticket {
 	if err := json.Unmarshal(response.Body.Bytes(), &ticket); err != nil {
 		t.Fatal(err)
 	}
-	if ticket.ID <= 0 || ticket.ProjectID != projectID || ticket.Version != 1 {
+	if ticket.ID <= 0 || ticket.ProjectID != projectID || ticket.Version != 1 || ticket.Archived || ticket.Assignee != "" {
 		t.Fatalf("invalid created ticket: %+v", ticket)
 	}
 	return ticket
@@ -500,7 +501,7 @@ func TestInvalidOriginsAndNewerSchema(t *testing.T) {
 			t.Fatalf("accepted invalid public URL %q", origin)
 		}
 	}
-	if _, err := fixture.store.database.Exec("PRAGMA user_version=2"); err != nil {
+	if _, err := fixture.store.database.Exec("PRAGMA user_version=3"); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.store.Close(); err != nil {
@@ -517,4 +518,478 @@ func TestInvalidUTF8IsRejectedBeforeJSONReplacement(t *testing.T) {
 	project := projectForTest(t, fixture, "UTF8")
 	body := "{\"title\":\"" + string([]byte{0xff}) + "\"}"
 	requireStatus(t, call(fixture.handler, "POST", fmt.Sprintf("/api/projects/%d/tickets", project.ID), body, 0), 400)
+}
+
+func TestProjectArchivePreservesRecordsAndVersions(t *testing.T) {
+	fixture := newFixture(t)
+	project := projectForTest(t, fixture, "ARCH")
+	ticket := ticketForTest(t, fixture, project.ID)
+	path := fmt.Sprintf("/api/projects/%d", project.ID)
+	ticketPath := fmt.Sprintf("%s/tickets/%d", path, ticket.ID)
+	requireStatus(t, call(fixture.handler, "POST", ticketPath+"/comments", `{"body":"Keep this discussion"}`, ticket.Version), 201)
+	preserved := make(map[string]string)
+	for _, suffix := range []string{"", "/comments", "/history"} {
+		response := call(fixture.handler, "GET", ticketPath+suffix, "", 0)
+		requireStatus(t, response, 200)
+		preserved[suffix] = response.Body.String()
+	}
+	response := call(fixture.handler, "PATCH", path, `{"archived":true}`, project.Version)
+	requireStatus(t, response, 200)
+	var archived Project
+	if err := json.Unmarshal(response.Body.Bytes(), &archived); err != nil {
+		t.Fatal(err)
+	}
+	if !archived.Archived || archived.Version != project.Version+1 || archived.Name != project.Name || strings.Join(archived.Statuses, "|") != strings.Join(project.Statuses, "|") {
+		t.Fatalf("invalid archived project: %+v", archived)
+	}
+	for suffix, before := range preserved {
+		response := call(fixture.handler, "GET", ticketPath+suffix, "", 0)
+		requireStatus(t, response, 200)
+		if response.Body.String() != before {
+			t.Fatalf("archiving changed ticket records at %s", suffix)
+		}
+	}
+	requireStatus(t, call(fixture.handler, "PATCH", path, `{"archived":false}`, 0), 428)
+	requireStatus(t, call(fixture.handler, "PATCH", path, `{"archived":false}`, project.Version), 409)
+	for _, body := range []string{`{}`, `{"archived":null}`, `{"archived":"true"}`, `{"name":"Partial"}`, `{"statuses":["Only"]}`} {
+		requireStatus(t, call(fixture.handler, "PATCH", path, body, archived.Version), 400)
+	}
+	response = call(fixture.handler, "GET", "/api/projects", "", 0)
+	requireStatus(t, response, 200)
+	if !strings.Contains(response.Body.String(), `"archived":true`) {
+		t.Fatal("API project listing must retain archived projects")
+	}
+	response = call(fixture.handler, "GET", path+"/events", "", 0)
+	requireStatus(t, response, 200)
+	var events struct {
+		Items []Event `json:"items"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &events); err != nil {
+		t.Fatal(err)
+	}
+	if len(events.Items) != 4 {
+		t.Fatalf("expected four retained events, got %d", len(events.Items))
+	}
+	last := events.Items[len(events.Items)-1]
+	if last.Kind != "project.updated" || !strings.Contains(string(last.Data), `"archived":true`) {
+		t.Fatal("archive must publish a committed project snapshot")
+	}
+	response = call(fixture.handler, "PATCH", path, `{"archived":false}`, archived.Version)
+	requireStatus(t, response, 200)
+	if err := json.Unmarshal(response.Body.Bytes(), &archived); err != nil {
+		t.Fatal(err)
+	}
+	if archived.Archived || archived.Version != project.Version+2 {
+		t.Fatal("restore did not advance project version")
+	}
+	if _, err := fixture.store.database.Exec(`CREATE TRIGGER fail_archive_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'forced event failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	requireStatus(t, call(fixture.handler, "PATCH", path, `{"archived":true}`, archived.Version), 409)
+	response = call(fixture.handler, "GET", path, "", 0)
+	requireStatus(t, response, 200)
+	var unchanged struct {
+		Archived bool  `json:"archived"`
+		Version  int64 `json:"version"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &unchanged); err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Archived || unchanged.Version != archived.Version {
+		t.Fatal("event failure partially archived a project")
+	}
+}
+
+func TestArchiveMigrationAndBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.sqlite")
+	legacy, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// These are the released v1 columns, including records whose event payloads predate archiving.
+	_, setupError := legacy.Exec(`
+CREATE TABLE projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, statuses TEXT NOT NULL CHECK(json_valid(statuses)), version INTEGER NOT NULL DEFAULT 1 CHECK(version>0), created_at TEXT NOT NULL);
+CREATE TABLE tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id), title TEXT NOT NULL, description TEXT NOT NULL, status TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1 CHECK(version>0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX tickets_project ON tickets(project_id,id);
+CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL REFERENCES tickets(id), body TEXT NOT NULL, actor TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE INDEX comments_ticket ON comments(ticket_id,id);
+CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id), ticket_id INTEGER REFERENCES tickets(id), kind TEXT NOT NULL, actor TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)), created_at TEXT NOT NULL);
+CREATE INDEX events_project ON events(project_id,id);
+CREATE INDEX events_ticket ON events(ticket_id,id);
+INSERT INTO projects VALUES(1,'Legacy','OLD','["To Do"]',1,'2026-01-01T00:00:00Z');
+INSERT INTO tickets VALUES(1,1,'Keep title','Keep description','To Do',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+INSERT INTO comments VALUES(1,1,'Keep comment','Owner','2026-01-01T00:00:00Z');
+INSERT INTO events VALUES(7,1,1,'ticket.created','Owner','{"id":1,"status":"To Do"}','2026-01-01T00:00:00Z');
+PRAGMA user_version=1;`)
+	closeError := legacy.Close()
+	if setupError != nil {
+		t.Fatal(setupError)
+	}
+	if closeError != nil {
+		t.Fatal(closeError)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	handler, err := NewServer(store, "http://docket.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := call(handler, "GET", "/api/projects/1", "", 0)
+	requireStatus(t, response, 200)
+	var project Project
+	if err := json.Unmarshal(response.Body.Bytes(), &project); err != nil {
+		t.Fatal(err)
+	}
+	if project.Archived || project.Version != 1 || project.Name != "Legacy" {
+		t.Fatal("migration changed an existing project")
+	}
+	var version int
+	if err := store.database.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 {
+		t.Fatalf("schema version %d, want 2", version)
+	}
+	records := make(map[string]string)
+	for _, route := range []string{"/api/projects/1/tickets/1", "/api/projects/1/tickets/1/comments", "/api/projects/1/tickets/1/history"} {
+		response := call(handler, "GET", route, "", 0)
+		requireStatus(t, response, 200)
+		records[route] = response.Body.String()
+	}
+	if !strings.Contains(records["/api/projects/1/tickets/1"], "Keep description") || !strings.Contains(records["/api/projects/1/tickets/1/comments"], "Keep comment") || !strings.Contains(records["/api/projects/1/tickets/1/history"], `"id":7`) {
+		t.Fatal("migration lost legacy records or cursor")
+	}
+	var legacyTicket Ticket
+	if err := json.Unmarshal([]byte(records["/api/projects/1/tickets/1"]), &legacyTicket); err != nil {
+		t.Fatal(err)
+	}
+	if legacyTicket.Archived || legacyTicket.Version != 1 || legacyTicket.Assignee != "" {
+		t.Fatal("migration changed existing ticket state")
+	}
+	requireStatus(t, call(handler, "PATCH", "/api/projects/1", `{"archived":true}`, 1), 200)
+	requireStatus(t, call(handler, "PATCH", "/api/projects/1/tickets/1", `{"assignee":"Legacy owner"}`, 1), 200)
+	requireStatus(t, call(handler, "PATCH", "/api/projects/1/tickets/1", `{"archived":true}`, 2), 200)
+	for route := range records {
+		response := call(handler, "GET", route, "", 0)
+		requireStatus(t, response, 200)
+		records[route] = response.Body.String()
+	}
+	if !strings.Contains(records["/api/projects/1/tickets/1"], `"archived":true`) || !strings.Contains(records["/api/projects/1/tickets/1"], `"assignee":"Legacy owner"`) {
+		t.Fatal("legacy ticket was not archived")
+	}
+	backup := filepath.Join(t.TempDir(), "archive-backup.sqlite")
+	if err := store.Backup(context.Background(), backup); err != nil {
+		t.Fatal(err)
+	}
+	for _, filename := range []string{path, backup} {
+		reopened, err := Open(filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := reopened.Close(); err != nil {
+				t.Error(err)
+			}
+		})
+		reopenedHandler, err := NewServer(reopened, "http://docket.test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := call(reopenedHandler, "GET", "/api/projects/1", "", 0)
+		requireStatus(t, response, 200)
+		if err := json.Unmarshal(response.Body.Bytes(), &project); err != nil {
+			t.Fatal(err)
+		}
+		if !project.Archived || project.Version != 2 {
+			t.Fatal("archive state lost on reopen or backup")
+		}
+		for route, before := range records {
+			response := call(reopenedHandler, "GET", route, "", 0)
+			requireStatus(t, response, 200)
+			if response.Body.String() != before {
+				t.Fatalf("record changed on reopen or backup: %s", route)
+			}
+		}
+	}
+}
+
+func TestProjectEventTailBootstrap(t *testing.T) {
+	fixture := newFixture(t)
+	first := projectForTest(t, fixture, "TAIL")
+	second := projectForTest(t, fixture, "ELSE")
+	ticketForTest(t, fixture, first.ID)
+	ticketForTest(t, fixture, second.ID)
+	response := call(fixture.handler, "GET", fmt.Sprintf("/api/projects/%d/events?tail=true&limit=1", first.ID), "", 0)
+	requireStatus(t, response, 200)
+	var page struct {
+		Items  []Event `json:"items"`
+		Cursor int64   `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ID != 3 || page.Cursor != 3 || page.Items[0].ProjectID != first.ID {
+		t.Fatalf("tail returned wrong project cursor: %+v", page)
+	}
+	requireStatus(t, call(fixture.handler, "PATCH", fmt.Sprintf("/api/projects/%d", first.ID), `{"archived":true}`, first.Version), 200)
+	response = call(fixture.handler, "GET", fmt.Sprintf("/api/projects/%d/events?after=%d", first.ID, page.Cursor), "", 0)
+	requireStatus(t, response, 200)
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ID != 5 || page.Cursor != 5 {
+		t.Fatal("bootstrap cursor skipped a subsequent mutation")
+	}
+	response = call(fixture.handler, "GET", fmt.Sprintf("/api/projects/%d/events?tail=true&limit=2", first.ID), "", 0)
+	requireStatus(t, response, 200)
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 || page.Items[0].ID != 3 || page.Items[1].ID != 5 {
+		t.Fatal("tail page must retain ascending event order")
+	}
+	for _, route := range []string{fmt.Sprintf("/api/projects/%d/events?tail=invalid", first.ID), fmt.Sprintf("/api/projects/%d/events?tail=true&after=1", first.ID), fmt.Sprintf("/api/projects/%d/tickets/1/history?tail=true", first.ID)} {
+		requireStatus(t, call(fixture.handler, "GET", route, "", 0), 400)
+	}
+}
+
+func TestTicketArchivePreservesDiscussionAndFiltersLists(t *testing.T) {
+	fixture := newFixture(t)
+	project := projectForTest(t, fixture, "TARCH")
+	ticket := ticketForTest(t, fixture, project.ID)
+	base := fmt.Sprintf("/api/projects/%d/tickets", project.ID)
+	path := fmt.Sprintf("%s/%d", base, ticket.ID)
+	requireStatus(t, call(fixture.handler, "POST", path+"/comments", `{"body":"Keep ticket discussion"}`, ticket.Version), 201)
+	beforeComments := call(fixture.handler, "GET", path+"/comments", "", 0)
+	requireStatus(t, beforeComments, 200)
+	response := call(fixture.handler, "PATCH", path, `{"archived":true}`, ticket.Version+1)
+	requireStatus(t, response, 200)
+	var archived Ticket
+	if err := json.Unmarshal(response.Body.Bytes(), &archived); err != nil {
+		t.Fatal(err)
+	}
+	if !archived.Archived || archived.Version != ticket.Version+2 || archived.Title != ticket.Title || archived.Description != ticket.Description || archived.Status != ticket.Status {
+		t.Fatalf("archive changed ticket contents: %+v", archived)
+	}
+	requireStatus(t, call(fixture.handler, "PATCH", path, `{"archived":false}`, 0), 428)
+	requireStatus(t, call(fixture.handler, "PATCH", path, `{"archived":false}`, ticket.Version+1), 409)
+	for _, query := range []string{"", "?archived=true", "?archived=false", "?archived="} {
+		response := call(fixture.handler, "GET", base+query, "", 0)
+		requireStatus(t, response, 200)
+		var page struct {
+			Items []Ticket `json:"items"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
+		if query != "?archived=true" {
+			if len(page.Items) != 0 {
+				t.Fatal("active list included archived ticket")
+			}
+		} else if len(page.Items) != 1 || page.Items[0].ID != ticket.ID {
+			t.Fatal("archive list lost ticket")
+		}
+	}
+	requireStatus(t, call(fixture.handler, "GET", base+"?archived=invalid", "", 0), 400)
+	response = call(fixture.handler, "GET", path+"/comments", "", 0)
+	requireStatus(t, response, 200)
+	if response.Body.String() != beforeComments.Body.String() {
+		t.Fatal("ticket archive changed discussion")
+	}
+	response = call(fixture.handler, "GET", path+"/history", "", 0)
+	requireStatus(t, response, 200)
+	var history struct {
+		Items []Event `json:"items"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &history); err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Items) != 3 || !strings.Contains(string(history.Items[2].Data), `"archived":true`) {
+		t.Fatal("ticket archive did not retain and append history")
+	}
+	response = call(fixture.handler, "PATCH", path, `{"archived":false}`, archived.Version)
+	requireStatus(t, response, 200)
+	if err := json.Unmarshal(response.Body.Bytes(), &archived); err != nil {
+		t.Fatal(err)
+	}
+	if archived.Archived || archived.Version != ticket.Version+3 {
+		t.Fatal("restore did not advance ticket version")
+	}
+	if _, err := fixture.store.database.Exec(`CREATE TRIGGER fail_ticket_archive_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'forced event failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	requireStatus(t, call(fixture.handler, "PATCH", path, `{"archived":true}`, archived.Version), 409)
+	response = call(fixture.handler, "GET", path, "", 0)
+	requireStatus(t, response, 200)
+	var unchanged struct {
+		Archived bool  `json:"archived"`
+		Version  int64 `json:"version"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &unchanged); err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Archived || unchanged.Version != archived.Version {
+		t.Fatal("event failure partially archived a ticket")
+	}
+}
+
+func TestArchiveMigrationFailureRollsBack(t *testing.T) {
+	fixture := newFixture(t)
+	projectForTest(t, fixture, "MFAIL")
+	// A conflicting ticket column forces the second ALTER to fail after the first succeeds.
+	if _, err := fixture.store.database.Exec("ALTER TABLE projects DROP COLUMN archived; PRAGMA user_version=1;"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := Open(fixture.path); err == nil {
+		if closeError := reopened.Close(); closeError != nil {
+			t.Error(closeError)
+		}
+		t.Fatal("inconsistent legacy schema unexpectedly migrated")
+	}
+	database, err := sql.Open("sqlite3", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	var version, columns, projects int
+	if err := database.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='archived'").Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT COUNT(*) FROM projects WHERE key='MFAIL'").Scan(&projects); err != nil {
+		t.Fatal(err)
+	}
+	if version != 1 || columns != 0 || projects != 1 {
+		t.Fatalf("partial migration: version=%d columns=%d projects=%d", version, columns, projects)
+	}
+}
+
+func TestTicketAssigneeIsOptionalVersionedText(t *testing.T) {
+	fixture := newFixture(t)
+	project := projectForTest(t, fixture, "ASSIGN")
+	ticket := ticketForTest(t, fixture, project.ID)
+	base := fmt.Sprintf("/api/projects/%d/tickets", project.ID)
+	path := fmt.Sprintf("%s/%d", base, ticket.ID)
+	response := call(fixture.handler, "PATCH", path, `{"assignee":"  Morgan  "}`, ticket.Version)
+	requireStatus(t, response, 200)
+	var assigned Ticket
+	if err := json.Unmarshal(response.Body.Bytes(), &assigned); err != nil {
+		t.Fatal(err)
+	}
+	if assigned.Assignee != "Morgan" || assigned.Version != ticket.Version+1 || assigned.Title != ticket.Title {
+		t.Fatalf("invalid assigned ticket: %+v", assigned)
+	}
+	requireStatus(t, call(fixture.handler, "PATCH", path, `{"assignee":"Other"}`, 0), 428)
+	requireStatus(t, call(fixture.handler, "PATCH", path, `{"assignee":"Other"}`, ticket.Version), 409)
+	for _, body := range []string{`{"assignee":42}`, `{"assignee":"\u0000"}`, `{"assignee":"` + strings.Repeat("é", 51) + `"}`} {
+		requireStatus(t, call(fixture.handler, "PATCH", path, body, assigned.Version), 400)
+	}
+	response = call(fixture.handler, "PATCH", path, `{"assignee":""}`, assigned.Version)
+	requireStatus(t, response, 200)
+	if err := json.Unmarshal(response.Body.Bytes(), &assigned); err != nil {
+		t.Fatal(err)
+	}
+	if assigned.Assignee != "" || assigned.Version != ticket.Version+2 {
+		t.Fatal("clearing assignee did not unassign the ticket")
+	}
+	response = call(fixture.handler, "POST", base, `{"title":"Assigned on create","assignee":"  Casey  "}`, 0)
+	requireStatus(t, response, 201)
+	if err := json.Unmarshal(response.Body.Bytes(), &assigned); err != nil {
+		t.Fatal(err)
+	}
+	if assigned.Assignee != "Casey" || assigned.Version != 1 {
+		t.Fatal("creation lost assignee")
+	}
+	response = call(fixture.handler, "GET", fmt.Sprintf("%s/%d/history", base, ticket.ID), "", 0)
+	requireStatus(t, response, 200)
+	var history struct {
+		Items []Event `json:"items"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &history); err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Items) != 3 || !strings.Contains(string(history.Items[1].Data), `"assignee":"Morgan"`) || !strings.Contains(string(history.Items[2].Data), `"assignee":""`) {
+		t.Fatal("assignee changes missing from durable history")
+	}
+	if _, err := fixture.store.database.Exec(`CREATE TRIGGER fail_assignment_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'forced event failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	requireStatus(t, call(fixture.handler, "PATCH", path, `{"assignee":"Must roll back"}`, ticket.Version+2), 409)
+	response = call(fixture.handler, "GET", path, "", 0)
+	requireStatus(t, response, 200)
+	if err := json.Unmarshal(response.Body.Bytes(), &assigned); err != nil {
+		t.Fatal(err)
+	}
+	if assigned.Assignee != "" || assigned.Version != ticket.Version+2 {
+		t.Fatal("event failure partially changed assignment")
+	}
+}
+
+func TestTicketListsExcludeArchivesByDefault(t *testing.T) {
+	fixture := newFixture(t)
+	project := projectForTest(t, fixture, "ACTIVE")
+	other := projectForTest(t, fixture, "OTHER")
+	archivedFirst := ticketForTest(t, fixture, project.ID)
+	activeFirst := ticketForTest(t, fixture, project.ID)
+	archivedNext := ticketForTest(t, fixture, project.ID)
+	activeNext := ticketForTest(t, fixture, project.ID)
+	ticketForTest(t, fixture, other.ID)
+	base := fmt.Sprintf("/api/projects/%d/tickets", project.ID)
+	for _, ticket := range []Ticket{archivedFirst, archivedNext} {
+		path := fmt.Sprintf("%s/%d", base, ticket.ID)
+		requireStatus(t, call(fixture.handler, "PATCH", path, `{"archived":true,"title":"Archived needle"}`, ticket.Version), 200)
+		requireStatus(t, call(fixture.handler, "GET", path, "", 0), 200)
+	}
+	cases := []struct {
+		query  string
+		ids    []int64
+		cursor int64
+	}{
+		{"", []int64{activeFirst.ID, activeNext.ID}, activeNext.ID},
+		{"?archived=false", []int64{activeFirst.ID, activeNext.ID}, activeNext.ID},
+		{"?archived=", []int64{activeFirst.ID, activeNext.ID}, activeNext.ID},
+		{"?archived=true", []int64{archivedFirst.ID, archivedNext.ID}, archivedNext.ID},
+		{"?q=Archived", nil, 0},
+		{"?q=Archived&archived=true", []int64{archivedFirst.ID, archivedNext.ID}, archivedNext.ID},
+		{"?q=Build&limit=1", []int64{activeFirst.ID}, activeFirst.ID},
+		{fmt.Sprintf("?q=Build&limit=1&after=%d", activeFirst.ID), []int64{activeNext.ID}, activeNext.ID},
+		{fmt.Sprintf("?q=Build&limit=1&after=%d", activeNext.ID), nil, activeNext.ID},
+		{fmt.Sprintf("?archived=true&limit=1&after=%d", archivedFirst.ID), []int64{archivedNext.ID}, archivedNext.ID},
+	}
+	for _, test := range cases {
+		response := call(fixture.handler, "GET", base+test.query, "", 0)
+		requireStatus(t, response, 200)
+		var page struct {
+			Items  []Ticket `json:"items"`
+			Cursor int64    `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Items) != len(test.ids) || page.Cursor != test.cursor {
+			t.Fatalf("query %q: got %d items and cursor %d, want %d items and cursor %d", test.query, len(page.Items), page.Cursor, len(test.ids), test.cursor)
+		}
+		for index, ticket := range page.Items {
+			if ticket.ID != test.ids[index] || ticket.ProjectID != project.ID {
+				t.Fatalf("query %q returned wrong ticket scope or order", test.query)
+			}
+		}
+	}
+	requireStatus(t, call(fixture.handler, "GET", base+"?archived=all", "", 0), 400)
 }

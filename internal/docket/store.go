@@ -27,8 +27,10 @@ const (
 	TitleBytesMax    = 200
 	TextBytesMax     = 16000
 	ActorBytesMax    = 80
+	AssigneeBytesMax = 100
 	databasePagesMax = 131072 // 512 MiB at the required 4096-byte page size; never silently discard history.
 	queryTimeout     = 5 * time.Second
+	schemaVersion    = 2
 )
 
 var defaultStatuses = []string{"To Do", "In Progress", "Blocked", "In Review", "Done"}
@@ -40,6 +42,7 @@ type Project struct {
 	Statuses  []string `json:"statuses"`
 	Version   int64    `json:"version"`
 	CreatedAt string   `json:"created_at"`
+	Archived  bool     `json:"archived"`
 }
 
 type Ticket struct {
@@ -51,6 +54,8 @@ type Ticket struct {
 	Version     int64  `json:"version"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
+	Archived    bool   `json:"archived"`
+	Assignee    string `json:"assignee"`
 }
 
 type Comment struct {
@@ -129,7 +134,7 @@ func (store *Store) initialize() error {
 	if err := store.database.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 1 {
+	if version > schemaVersion {
 		return errors.New("database schema is newer than this executable")
 	}
 	if err := store.database.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize); err != nil {
@@ -145,7 +150,7 @@ func (store *Store) initialize() error {
 	if pagesMax > databasePagesMax {
 		return errors.New("database already exceeds the supported page limit")
 	}
-	if version == 1 {
+	if version == schemaVersion {
 		return nil
 	}
 	transaction, err := store.database.BeginTx(ctx, nil)
@@ -153,6 +158,16 @@ func (store *Store) initialize() error {
 		return err
 	}
 	defer rollback(transaction)
+	if version == 1 {
+		if _, err := transaction.ExecContext(ctx, `
+ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1));
+ALTER TABLE tickets ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1));
+ALTER TABLE tickets ADD COLUMN assignee TEXT NOT NULL DEFAULT '';
+PRAGMA user_version=2;`); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	}
 	_, err = transaction.ExecContext(ctx, `
 CREATE TABLE projects (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,7 +175,8 @@ CREATE TABLE projects (
  key TEXT NOT NULL UNIQUE,
  statuses TEXT NOT NULL CHECK(json_valid(statuses)),
  version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
- created_at TEXT NOT NULL
+ created_at TEXT NOT NULL,
+ archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1))
 );
 CREATE TABLE tickets (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -170,7 +186,9 @@ CREATE TABLE tickets (
  status TEXT NOT NULL,
  version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
  created_at TEXT NOT NULL,
- updated_at TEXT NOT NULL
+ updated_at TEXT NOT NULL,
+ archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)),
+ assignee TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX tickets_project ON tickets(project_id, id);
 CREATE TABLE comments (
@@ -192,7 +210,7 @@ CREATE TABLE events (
 );
 CREATE INDEX events_project ON events(project_id, id);
 CREATE INDEX events_ticket ON events(ticket_id, id);
-PRAGMA user_version=1;`)
+PRAGMA user_version=2;`)
 	if err != nil {
 		return err
 	}
@@ -252,7 +270,7 @@ type rowReader interface{ Scan(...any) error }
 func readProject(row rowReader) (Project, error) {
 	var project Project
 	var statuses string
-	if err := row.Scan(&project.ID, &project.Name, &project.Key, &statuses, &project.Version, &project.CreatedAt); err != nil {
+	if err := row.Scan(&project.ID, &project.Name, &project.Key, &statuses, &project.Version, &project.CreatedAt, &project.Archived); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return project, notFound
 		}
@@ -269,15 +287,15 @@ func readProject(row rowReader) (Project, error) {
 
 func readTicket(row rowReader) (Ticket, error) {
 	var ticket Ticket
-	err := row.Scan(&ticket.ID, &ticket.ProjectID, &ticket.Title, &ticket.Description, &ticket.Status, &ticket.Version, &ticket.CreatedAt, &ticket.UpdatedAt)
+	err := row.Scan(&ticket.ID, &ticket.ProjectID, &ticket.Title, &ticket.Description, &ticket.Status, &ticket.Version, &ticket.CreatedAt, &ticket.UpdatedAt, &ticket.Archived, &ticket.Assignee)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ticket, notFound
 	}
 	return ticket, err
 }
 
-const projectColumns = "id,name,key,statuses,version,created_at"
-const ticketColumns = "id,project_id,title,description,status,version,created_at,updated_at"
+const projectColumns = "id,name,key,statuses,version,created_at,archived"
+const ticketColumns = "id,project_id,title,description,status,version,created_at,updated_at,archived,assignee"
 
 func validText(value string, maximum int, required bool) bool {
 	return utf8.ValidString(value) && len(value) <= maximum && !strings.ContainsRune(value, 0) && (!required || strings.TrimSpace(value) != "")

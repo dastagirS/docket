@@ -27,16 +27,23 @@ The proxy must preserve the configured Host header. Forwarded headers are not tr
 
 ## Included
 
-- Projects with stable URLs such as `/projects/1`, unique short keys, and configurable status names/order.
+- Projects with stable URLs such as `/projects/1`, one-click URL copying, unique short keys, and configurable status names/order.
+- Reversible project and ticket archiving with separate active/archived views; no tickets, comments, or history are deleted. Open the gear icon for project settings, where **Delete project** explains that the project is moved to Archived; archived projects offer **Restore project** there.
+- Optional free-text ticket assignees, shown on cards and in lists; no accounts or user directory required.
+- Automatic updates about every three seconds while the tab is visible, preserving search, loaded pages, and unsaved ticket/comment drafts.
 - Board and list views, title search, responsive ticket detail panel.
 - Ticket descriptions and comments as plain text, status changes, permanent attributed history.
 - Version-checked ticket/project edits and comments; stale writes return `409`, not silent overwrites.
 - Project-scoped REST routes and durable, cursor-based change events. Ticket changes, comments, and their history/events commit in one transaction.
 - Consistent online backups and schema-version validation.
 
-Default statuses: To Do, In Progress, Blocked, In Review, Done. Remove only statuses with no tickets. Keys are immutable. There is no deletion, archiving, markdown rendering, drag-and-drop, attachment upload, or outgoing webhook delivery in v1.
+Default statuses: To Do, In Progress, Blocked, In Review, Done. Remove only statuses with no tickets. Keys are immutable. There is no permanent deletion, markdown rendering, drag-and-drop, attachment upload, or outgoing webhook delivery in v1. Archiving only organizes records: saved project URLs and API operations keep working, and archived projects/tickets still count toward storage limits. Archiving a project does not change its tickets' individual archive flags. The ticket-list API excludes archived tickets by default; use `?archived=true` to request archived tickets explicitly. The API applies archive filtering before pagination.
 
 Project URLs identify boards; they are not secrets or permissions. Repository initialization, discovery, parent ownership, delegation, and repo/subagent guardrails remain in the **separate Pi integration**, not this executable. Those guards are not implemented here. [TODO.md](TODO.md) records follow-up work; [CONTEXT.md](CONTEXT.md) records the agreed boundaries.
+
+Existing schema-v1 databases automatically migrate to schema v2 on startup. Existing projects and tickets start active, and existing tickets start unassigned; IDs, keys, descriptions, comments, and event cursors are retained. Take a consistent backup before upgrading. Older executables cannot open schema v2; rolling back requires restoring a pre-upgrade backup with the server stopped, with the cursor reconciliation described below.
+
+Live updates use bounded polling of the durable event feed, not WebSockets or a permanent connection. Hidden tabs pause polling. Open tickets update automatically unless there are unsaved ticket edits; those edits are kept and a reload/conflict warning is shown instead. An unsent comment is preserved. Each visible tab consumes requests under the instance-wide rate limit, and the UI's existing record-display limits still apply.
 
 ## Frontend development
 

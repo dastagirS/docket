@@ -4,6 +4,7 @@
   import { api, ApiError, errorMessage, DEFAULT_STATUSES, STATUSES_MAX, STATUS_BYTES_MAX, projectPath, readProject, type Project } from "./api";
 
   export let onsaved: (project: Project) => Promise<void>;
+  export let onarchived: (project: Project) => Promise<void>;
   export let notify: (message: string) => void;
   let dialog: HTMLDialogElement;
   let titleInput: HTMLInputElement;
@@ -65,6 +66,26 @@
     await focusStatus(statuses.length - 1);
   }
   function run(action: () => Promise<void>): void { action().catch((failure: unknown) => notify(errorMessage(failure))); }
+  async function toggleArchive(): Promise<void> {
+    if (!editing || pending) return;
+    const selected = editing;
+    const unsaved = name !== selected.name || statuses.length !== selected.statuses.length || statuses.some((status, index) => status !== selected.statuses[index]);
+    const message = selected.archived
+      ? `Restore ${selected.name} to active projects?`
+      : `Delete ${selected.name}? It will be archived, not permanently deleted. Tickets, comments, and history are kept, and you can restore it later.`;
+    if ((!selected.archived || unsaved) && !confirm(message + (unsaved ? " Unsaved settings will be discarded." : ""))) return;
+    error = "";
+    pending = true;
+    try {
+      const saved = await api(projectPath(selected.id), { method: "PATCH", headers: { "If-Match": `"${selected.version}"` }, body: JSON.stringify({ archived: !selected.archived }) }, readProject);
+      dialog.close();
+      await onarchived(saved);
+      notify(saved.archived ? "Project moved to Archived. Nothing was permanently deleted." : "Project restored.");
+    } catch (failure) {
+      error = errorMessage(failure) + (failure instanceof ApiError ? "" : " Reload to check the result before submitting again.");
+      if (!dialog.open) notify(error);
+    } finally { pending = false; }
+  }
   async function save(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (pending) return;
@@ -97,34 +118,54 @@
   }
 </script>
 
-<dialog id="project-dialog" class="project-dialog" bind:this={dialog} oncancel={(event) => { if (pending) event.preventDefault(); }}>
+<dialog id="project-dialog" class="project-dialog" class:settings-dialog={!!editing} aria-labelledby="project-dialog-title" bind:this={dialog} oncancel={(event) => { if (pending) event.preventDefault(); }}>
   <form id="project-form" onsubmit={(event) => run(() => save(event))}>
-    <div class="dialog-heading"><h2 id="project-dialog-title">{editing ? "Project settings" : "New project"}</h2><button type="button" id="close-project" class="icon-button" aria-label="Close project form" disabled={pending} onclick={close}><Icon name="close" /></button></div>
-    <p class="muted" id="project-help">{editing ? "Keep the workflow small and clear." : "Give this work a place to live."}</p>
-    <label>Project name<input id="project-title" bind:this={titleInput} bind:value={name} oninput={nameChanged} required maxlength="100" placeholder="e.g. Personal website" autocomplete="off" disabled={pending}></label>
-    <label>Project key<input id="project-key" bind:value={key} oninput={() => { keyManual = true; }} required minlength="2" maxlength="10" pattern={"[A-Za-z0-9]{2,10}"} placeholder="WEB" autocomplete="off" disabled={pending || !!editing}><small>A short, unique label. Letters and numbers only.</small></label>
-    <section class="workflow" aria-labelledby="workflow-label">
-      <div class="workflow-heading"><h3 id="workflow-label">Workflow</h3><button id="workflow-toggle" class="workflow-toggle" type="button" aria-expanded={expanded} aria-controls="workflow-editor" disabled={pending} onclick={() => { expanded = !expanded; }}>{expanded ? "Done" : "Customize workflow"}</button></div>
-      <div id="workflow-preview" class="status-preview" aria-label="Project statuses" hidden={expanded}>
-        {#each statuses as status, index}<span class="status-chip"><span class={`status-dot tone-${index % 5}`}></span><span class="status-chip-name">{status}</span></span>{/each}
-      </div>
-      <div id="workflow-editor" hidden={!expanded}>
-        <ol id="workflow-statuses" class="status-list" aria-label="Workflow statuses" bind:this={statusList}>
-          {#each statuses as status, index}
-            <li class="status-row"><span class={`status-dot tone-${index % 5}`}></span><input class="status-name" type="text" bind:value={statuses[index]} oninput={statusChanged} maxlength={STATUS_BYTES_MAX} placeholder="Status name" autocomplete="off" aria-label={`Status ${index + 1} name`} aria-required="true" aria-invalid={invalidIndex === index ? "true" : undefined} aria-describedby="status-error" disabled={pending}>
-              <div class="status-controls">
-                <button type="button" class="status-control status-up" aria-label={`Move status ${index + 1} up`} title="Move up" disabled={pending || index === 0} onclick={() => run(() => moveStatus(index, -1))}><Icon name="arrow-up" /></button>
-                <button type="button" class="status-control status-down" aria-label={`Move status ${index + 1} down`} title="Move down" disabled={pending || index === statuses.length - 1} onclick={() => run(() => moveStatus(index, 1))}><Icon name="arrow-down" /></button>
-                <button type="button" class="status-control status-remove" aria-label={`Remove status ${index + 1}`} title="Remove status" disabled={pending || statuses.length <= 1} onclick={() => run(() => removeStatus(index))}><Icon name="close" /></button>
-              </div>
-            </li>
-          {/each}
-        </ol>
-        <div class="workflow-actions"><button id="add-status" class="add-status" type="button" disabled={pending || statuses.length >= STATUSES_MAX} onclick={() => run(addStatus)}><Icon name="plus" /> Add status</button><span id="status-count" class="muted">{statuses.length} / {STATUSES_MAX}</span></div>
-        <p class="workflow-hint">Board columns follow this order. Move tickets before removing or renaming a status in use.</p>
-      </div>
-      <p id="status-error" class="form-error" role="alert">{statusError}</p>
-    </section>
-    <p id="project-error" class="form-error" role="alert">{error}</p><div class="form-actions"><button type="button" id="cancel-project" class="quiet" disabled={pending} onclick={close}>Cancel</button><button type="submit" id="save-project" class="primary" disabled={pending}>{editing ? "Save project" : "Create project"}</button></div>
+    <div class="project-form-header">
+      <div class="dialog-heading"><div class="project-heading">{#if editing}<span class="settings-mark"><Icon name="settings" /></span>{/if}<div>{#if editing}<span class="settings-eyebrow">{editing.key} / PROJECT</span>{/if}<h2 id="project-dialog-title">{editing ? "Project settings" : "New project"}</h2></div></div><button type="button" id="close-project" class="icon-button" aria-label="Close project form" disabled={pending} onclick={close}><Icon name="close" /></button></div>
+      <p class="muted" id="project-help">{editing ? "Manage the details, workflow, and visibility of your project." : "Give this work a place to live."}</p>
+    </div>
+    <div class="project-form-body">
+      <section class="project-general" aria-label="Project details">
+        {#if editing}<h3>General</h3><p class="settings-section-help">A clear name makes this project easy to find.</p>{/if}
+        <div class="project-fields">
+          <label>Project name<input id="project-title" bind:this={titleInput} bind:value={name} oninput={nameChanged} required maxlength="100" placeholder="e.g. Personal website" autocomplete="off" disabled={pending}></label>
+          <label>Project key<input id="project-key" bind:value={key} oninput={() => { keyManual = true; }} required minlength="2" maxlength="10" pattern={"[A-Za-z0-9]{2,10}"} placeholder="WEB" autocomplete="off" disabled={pending || !!editing}><small>{editing ? "Permanent identifier. Cannot be changed." : "A short, unique label. Letters and numbers only."}</small></label>
+        </div>
+      </section>
+      <section class="workflow" aria-labelledby="workflow-label">
+        <div class="workflow-heading"><div class="workflow-title"><h3 id="workflow-label">Statuses</h3><span id="status-count" aria-label={`${statuses.length} of ${STATUSES_MAX} statuses`}>{statuses.length} / {STATUSES_MAX}</span></div><button id="workflow-toggle" class="workflow-toggle" type="button" aria-expanded={expanded} aria-controls="workflow-editor" disabled={pending} onclick={() => { expanded = !expanded; }}><Icon name={expanded ? "arrow-up" : "settings"} />{expanded ? "Collapse" : "Edit statuses"}</button></div>
+        <div id="workflow-preview" class="status-preview" aria-label="Project statuses" hidden={expanded}>
+          {#each statuses as status, index}<span class="status-chip"><span class={`status-dot tone-${index % 5}`}></span><span class="status-chip-name">{status}</span></span>{/each}
+        </div>
+        <div id="workflow-editor" hidden={!expanded}>
+          <ol id="workflow-statuses" class="status-list" aria-label="Workflow statuses" bind:this={statusList}>
+            {#each statuses as status, index}
+              <li class="status-row" class:status-invalid={invalidIndex === index}>
+                <span class="status-order" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
+                <div class="status-title-line"><span class={`status-dot tone-${index % 5}`} aria-hidden="true"></span><input class="status-name" type="text" bind:value={statuses[index]} oninput={statusChanged} maxlength={STATUS_BYTES_MAX} placeholder="Status name" autocomplete="off" aria-label={`Status ${index + 1} name`} aria-required="true" aria-invalid={invalidIndex === index ? "true" : undefined} aria-describedby={index === 0 ? "status-error workflow-default-help" : "status-error"} disabled={pending}>{#if index === 0}<span class="status-default">Default</span>{/if}</div>
+                <div class="status-controls">
+                  <div class="status-reorder">
+                    <button type="button" class="status-control status-up" aria-label={`Move status ${index + 1} up`} title="Move up" disabled={pending || index === 0} onclick={() => run(() => moveStatus(index, -1))}><Icon name="arrow-up" /></button>
+                    <button type="button" class="status-control status-down" aria-label={`Move status ${index + 1} down`} title="Move down" disabled={pending || index === statuses.length - 1} onclick={() => run(() => moveStatus(index, 1))}><Icon name="arrow-down" /></button>
+                  </div>
+                  <button type="button" class="status-control status-remove" aria-label={`Remove status ${index + 1}`} title="Remove status" disabled={pending || statuses.length <= 1} onclick={() => run(() => removeStatus(index))}><Icon name="close" /></button>
+                </div>
+              </li>
+            {/each}
+          </ol>
+          <div class="workflow-actions"><button id="add-status" class="add-status" type="button" disabled={pending || statuses.length >= STATUSES_MAX} onclick={() => run(addStatus)}><Icon name="plus" />{statuses.length >= STATUSES_MAX ? "Status limit reached" : "Add a status"}</button></div>
+          <p id="workflow-default-help" class="workflow-hint">New tickets start in the first status. Board columns follow this order.</p>
+          <p class="workflow-hint workflow-safety">Move tickets before removing or renaming a status in use.</p>
+        </div>
+        <p id="status-error" class="form-error" role="alert">{statusError}</p>
+      </section>
+      {#if editing}
+        <section id="project-lifecycle" class="project-lifecycle" class:project-restoring={editing.archived} aria-labelledby="project-lifecycle-title">
+          <div><h3 id="project-lifecycle-title">{editing.archived ? "Bring this project back" : "Delete project"}</h3><p id="project-lifecycle-help">{editing.archived ? "Restore this project to Active. Its tickets, comments, and history stay exactly as they are." : "Deleting moves this project to Archived. Tickets, comments, and history are kept. You can restore it anytime."}</p></div>
+          <button id="archive-project" type="button" class={editing.archived ? "quiet bordered" : "danger-button"} aria-describedby="project-lifecycle-help" disabled={pending} onclick={() => run(toggleArchive)}><Icon name={editing.archived ? "restore" : "archive"} />{editing.archived ? "Restore project" : "Delete project"}</button>
+        </section>
+      {/if}
+    </div>
+    <div class="project-form-footer"><p id="project-error" class="form-error" role="alert">{error}</p><div class="form-actions"><button type="button" id="cancel-project" class="quiet" disabled={pending} onclick={close}>Cancel</button><button type="submit" id="save-project" class="primary" disabled={pending}>{editing ? "Save changes" : "Create project"}</button></div></div>
   </form>
 </dialog>

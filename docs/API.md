@@ -39,9 +39,11 @@ curl -H 'Content-Type: application/json' -H 'If-Match: "2"' \
   http://127.0.0.1:7331/api/projects/1/tickets/1/comments
 ```
 
-Project creation: `name`, unique case-normalized `key` (2–10 ASCII letters/digits), optional `statuses` (ordered string array). Default statuses are documented in README. Project PATCH requires both `name` and `statuses`; key cannot change. Removing a status in use returns `409`; move its tickets first.
+Project creation: `name`, unique case-normalized `key` (2–10 ASCII letters/digits), optional `statuses` (ordered string array). Default statuses are documented in README. Projects expose `archived` (initially `false`). Project PATCH accepts `name` and `statuses` together, an `archived` boolean, or both. Key cannot change. Removing a status in use returns `409`; move its tickets first. `{"archived":true}` archives and `{"archived":false}` restores, with the usual `If-Match` precondition.
 
-Ticket creation requires `title`; `description` defaults empty and `status` defaults to the project's first status. Ticket PATCH accepts any nonempty subset of `title`, `description`, `status`. Comment POST accepts `body` and returns `{comment, ticket_version}`.
+Ticket creation requires `title`; `description` and `assignee` default empty and `status` defaults to the project's first status. `assignee` is a trimmed, free-text label of at most 100 UTF-8 bytes, not an account, authorization rule, or authenticated identity. An empty string means unassigned. Tickets expose `archived` (initially `false`); archive existing tickets with PATCH, not creation. Ticket PATCH accepts any nonempty subset of `title`, `description`, `status`, `assignee`, and `archived`. Set `assignee` to `""` to unassign. Comment POST accepts `body` and returns `{comment, ticket_version}`.
+
+Archiving projects or tickets never deletes records or changes their IDs/keys. Archived records remain readable and editable through the same routes; comments and history remain available. Project archiving does not change individual ticket archive flags. All archived records still count toward capacity limits. The project list includes both active and archived projects. Ticket lists return **active tickets only by default**, including when `archived` is omitted or empty. `?archived=false` explicitly selects active tickets; `?archived=true` explicitly selects archived tickets only. Archive filtering is applied by the API's SQL query before pagination, not by the client. Invalid archive filter values return `400`. Clients that previously relied on an unfiltered list including both states must now query the active and archived lists separately.
 
 Project/ticket GET returns an ETag such as `"3"`. Every project PATCH, ticket PATCH, and comment POST requires the quoted current version in `If-Match`. Missing precondition: `428`; malformed precondition: `400`; stale version: `409`. A comment advances its ticket's version. Project and ticket versions are independent.
 
@@ -51,15 +53,21 @@ Writes are transactions: a successful mutation and its event/history are committ
 
 All collection routes return `{ "items": [...], "next_cursor": 42 }` in ascending ID order. Use `?after=42&limit=100`. Default/max page size 100. A short page means the feed/list is currently caught up; an empty page preserves the supplied cursor. Gaps in IDs are normal, especially in a project-scoped event feed.
 
-Ticket lists accept `q` for substring title search (SQLite's built-in ASCII case folding). Search scope is the route's project, not every project. Continue using the same search string while paging.
+Ticket lists accept `q` for substring title search (SQLite's built-in ASCII case folding). Search scope is the route's project, not every project. Continue using the same search string and `archived` filter while paging.
+
+Project event feeds additionally accept `?tail=true&limit=1` to bootstrap at the newest event without replaying the entire feed. Tail pages contain the newest bounded set of events in ascending ID order; `next_cursor` is the newest returned event ID (zero if there are none). Tail mode cannot be combined with a positive `after` cursor or used on ticket history. Capture a tail cursor **before** reading the initial board snapshot, then poll normally with `after` to avoid losing mutations that race the snapshot. Tail mode is for snapshot-based UI initialization, not a substitute for an integration's durable replay cursor.
 
 Events contain `id`, `project_id`, optional `ticket_id`, `kind`, `actor`, `created_at`, and `data`:
 
-- `project.created`, `project.updated`: complete project snapshot.
-- `ticket.created`, `ticket.updated`: complete ticket snapshot.
+- `project.created`, `project.updated`: complete project snapshot. Archive/restore uses `project.updated` with the new `archived` state.
+- `ticket.created`, `ticket.updated`: complete ticket snapshot, including `assignee` and `archived`. Assignment and archive/restore changes use `ticket.updated`.
 - `comment.created`: `{comment, ticket_version}`.
 
 History uses these same committed records; no independent best-effort notification step exists. Integrations poll the project feed, process a page, and **persist the cursor only after successful processing**. A consumer crash can replay already-processed events: deduplicate by event ID or use idempotent handling. Each consumer stores its own cursor; Docket has no consumer registration/acknowledgement endpoint. There is no outbound webhook or automatic task launch.
+
+The browser polls about every three seconds while visible, with no overlapping poll cycles. It refreshes project navigation and changed board snapshots, preserves the current search/archive filter and number of loaded pages, and updates open tickets/discussion without a document reload. Unsaved ticket fields retain their original version and values when an external change arrives; the UI offers reload and a stale save still returns `409`. Unsent comment drafts are preserved. Polling is bounded by the documented page/display limits and counts toward the global rate limit. This is eventual polling, not instantaneous push or an offline guarantee.
+
+Legacy events written before schema v2 may omit `archived` and `assignee`; do not rewrite old history. Consumers should interpret absent archive/assignee fields in those older snapshots as active/unassigned.
 
 Events survive ordinary restarts, process kills, and consistent backups. No event expiry/eviction. Data-directory replacement or restoration to an older snapshot is not an ordinary restart: consumers must explicitly reconcile lost/newer history and their saved cursors. No exactly-once or network-partition guarantee is claimed.
 
@@ -71,7 +79,7 @@ Events survive ordinary restarts, process kills, and consistent backups. No even
 | Events per instance | 250,000; writes fail instead of pruning |
 | SQLite main database | 512 MiB at 4096-byte pages; WAL/temporary/backup files need additional disk headroom |
 | Statuses per project | 1–12 unique, trimmed names |
-| Name / status / title | 100 / 100 / 200 UTF-8 bytes |
+| Name / status / title / assignee | 100 / 100 / 200 / 100 UTF-8 bytes |
 | Description / comment / actor label | 16,000 / 16,000 / 80 UTF-8 bytes |
 | Request body / headers | 64 KiB / 16 KiB |
 | Page size | 1–100 |

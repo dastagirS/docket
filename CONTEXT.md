@@ -8,6 +8,10 @@ A small, independent ticketing system for humans and API clients. External integ
 
 **Ticket**: A described unit of requested work tracked within a project.
 
+**Assignee**: An optional free-text label on a ticket. It is not an account, verified identity, or permission.
+
+**Archived**: A reversible organizational state for a project or ticket. It removes the record from active UI views without deleting it, hiding its API routes, or making it read-only.
+
 **Status**: A configurable progress state for a ticket.
 
 **Comment**: An attributed contribution to a ticket's discussion.
@@ -23,7 +27,8 @@ A small, independent ticketing system for humans and API clients. External integ
 ## Relationships
 
 - A **Project** contains **Tickets**.
-- A **Ticket** has a current **Status**, **Comments**, and **History**.
+- A **Ticket** has a current **Status**, optional **Assignee**, **Comments**, and **History**.
+- Projects and tickets may be **Archived** independently. Archiving a project preserves its tickets and their individual archive states.
 - **Change events** let **Integrations** react without making the integration part of the ticketing system.
 - Repository markers, parent-session ownership, agent delegation, and assigned-ticket-only worker access belong to the Pi **Integration**, not Docket's core domain.
 
@@ -39,3 +44,5 @@ A small, independent ticketing system for humans and API clients. External integ
 - Anyone able to reach the unauthenticated server can access its exposed boards and operations. Project URLs identify boards; they are not access credentials.
 - Repository integration scope resolved: pin each repo to its configured project URL, derive board identity from that configuration rather than agent input, reject cross-board ticket references, and preserve the scope for subagents. These are accidental-access guards, not security isolation against unrestricted shell/network access.
 - Event delivery resolved: integrations consume a durable, cursor-based change feed, save their own position, and replay missed changes after downtime. No outgoing webhooks in v1.
+- "Copy project" means copying its stable URL, not duplicating records. "Delete" currently means reversible archiving, for both projects and tickets; permanent deletion is not implemented.
+- Live browser updates use bounded, visible-tab polling of project change events. Draft edits retain their original version and are never silently replaced by remote changes.

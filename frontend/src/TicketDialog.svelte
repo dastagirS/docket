@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
   import Icon from "./Icon.svelte";
-  import { api, ApiError, errorMessage, ACTIVITY_VISIBLE_MAX, PAGE_SIZE, projectPath, ticketPath, readTicket, readPage, readComment, readEvent, readCommentResult, dateLabel, type Project, type Ticket, type Comment, type ChangeEvent } from "./api";
+  import { api, ApiError, errorMessage, ACTIVITY_VISIBLE_MAX, ASSIGNEE_BYTES_MAX, PAGE_SIZE, projectPath, ticketPath, readTicket, readPage, readComment, readEvent, readCommentResult, dateLabel, type Project, type Ticket, type Comment, type ChangeEvent } from "./api";
 
   export let onsaved: (projectID: number) => Promise<void>;
   export let notify: (message: string) => void;
@@ -12,6 +12,7 @@
   let title = "";
   let description = "";
   let status = "";
+  let assignee = "";
   let commentBody = "";
   let comments: Comment[] = [];
   let history: ChangeEvent[] = [];
@@ -25,6 +26,7 @@
   let commentError = "";
   let reload = false;
   let generation = 0;
+  let observedVersion = 0;
   const descriptions: Record<string, string> = { "ticket.created": "created this ticket", "ticket.updated": "updated this ticket", "comment.created": "added a comment" };
 
   export function close(): boolean {
@@ -44,9 +46,11 @@
     if (currentGeneration !== generation) return;
     project = selected;
     ticket = loaded;
+    observedVersion = loaded?.version ?? 0;
     title = loaded?.title ?? "";
     description = loaded?.description ?? "";
     status = loaded?.status ?? initialStatus;
+    assignee = loaded?.assignee ?? "";
     comments = [];
     history = [];
     commentsMore = false;
@@ -62,29 +66,67 @@
     titleInput.focus();
     if (ticket) await Promise.all([loadComments(), loadHistory()]);
   }
-  async function loadComments(more = false): Promise<void> {
+  export async function sync(selected: Project): Promise<void> {
+    if (!dialog.open || pending || commentsLoading || historyLoading || !ticket || project?.id !== selected.id) return;
+    const currentGeneration = generation;
+    const loaded = await api(ticketPath(selected.id, ticket.id), {}, readTicket);
+    if (currentGeneration !== generation || pending || commentsLoading || historyLoading) return;
+    project = selected;
+    if (loaded.version === observedVersion) return;
+    if (dirty) {
+      reload = true;
+      ticketError = "This ticket changed elsewhere. Your unsaved edits are preserved; reload latest before saving.";
+    } else {
+      ticket = loaded;
+      title = loaded.title;
+      description = loaded.description;
+      status = loaded.status;
+      assignee = loaded.assignee;
+      reload = false;
+      ticketError = "";
+    }
+    await Promise.all([loadComments(false, comments.length), loadHistory(false, history.length)]);
+    if (currentGeneration === generation) observedVersion = loaded.version;
+  }
+  async function loadComments(more = false, visibleCount = PAGE_SIZE): Promise<void> {
     if (!project || !ticket || commentsLoading) return;
     const previous = more ? comments : [];
     if (previous.length >= ACTIVITY_VISIBLE_MAX) return;
     const currentGeneration = generation;
     commentsLoading = true;
     try {
-      const page = await api(`${ticketPath(project.id, ticket.id)}/comments?after=${previous.at(-1)?.id ?? 0}`, {}, readPage(readComment));
+      const path = `${ticketPath(project.id, ticket.id)}/comments`;
+      let page = await api(`${path}?after=${previous.at(-1)?.id ?? 0}`, {}, readPage(readComment));
+      const loaded = [...previous, ...page.items];
+      const pageCount = more ? 1 : Math.min(Math.max(1, Math.ceil(visibleCount / PAGE_SIZE)), ACTIVITY_VISIBLE_MAX / PAGE_SIZE);
+      for (let i = 1; i < pageCount && page.items.length === PAGE_SIZE; i++) {
+        if (currentGeneration !== generation) return;
+        page = await api(`${path}?after=${page.next_cursor}`, {}, readPage(readComment));
+        loaded.push(...page.items);
+      }
       if (currentGeneration !== generation) return;
-      comments = [...previous, ...page.items].slice(0, ACTIVITY_VISIBLE_MAX);
+      comments = loaded.slice(0, ACTIVITY_VISIBLE_MAX);
       commentsMore = page.items.length === PAGE_SIZE && comments.length < ACTIVITY_VISIBLE_MAX;
     } finally { if (currentGeneration === generation) commentsLoading = false; }
   }
-  async function loadHistory(more = false): Promise<void> {
+  async function loadHistory(more = false, visibleCount = PAGE_SIZE): Promise<void> {
     if (!project || !ticket || historyLoading) return;
     const previous = more ? history : [];
     if (previous.length >= ACTIVITY_VISIBLE_MAX) return;
     const currentGeneration = generation;
     historyLoading = true;
     try {
-      const page = await api(`${ticketPath(project.id, ticket.id)}/history?after=${previous.at(-1)?.id ?? 0}`, {}, readPage(readEvent));
+      const path = `${ticketPath(project.id, ticket.id)}/history`;
+      let page = await api(`${path}?after=${previous.at(-1)?.id ?? 0}`, {}, readPage(readEvent));
+      const loaded = [...previous, ...page.items];
+      const pageCount = more ? 1 : Math.min(Math.max(1, Math.ceil(visibleCount / PAGE_SIZE)), ACTIVITY_VISIBLE_MAX / PAGE_SIZE);
+      for (let i = 1; i < pageCount && page.items.length === PAGE_SIZE; i++) {
+        if (currentGeneration !== generation) return;
+        page = await api(`${path}?after=${page.next_cursor}`, {}, readPage(readEvent));
+        loaded.push(...page.items);
+      }
       if (currentGeneration !== generation) return;
-      history = [...previous, ...page.items].slice(0, ACTIVITY_VISIBLE_MAX);
+      history = loaded.slice(0, ACTIVITY_VISIBLE_MAX);
       historyMore = page.items.length === PAGE_SIZE && history.length < ACTIVITY_VISIBLE_MAX;
     } finally { if (currentGeneration === generation) historyLoading = false; }
   }
@@ -101,8 +143,10 @@
     ticketError = "";
     try {
       const editing = ticket !== null;
-      const saved = await api(ticket ? ticketPath(selected.id, ticket.id) : `${projectPath(selected.id)}/tickets`, { method: ticket ? "PATCH" : "POST", headers: ticket ? { "If-Match": `"${ticket.version}"` } : {}, body: JSON.stringify({ title, description, status }) }, readTicket);
+      const saved = await api(ticket ? ticketPath(selected.id, ticket.id) : `${projectPath(selected.id)}/tickets`, { method: ticket ? "PATCH" : "POST", headers: ticket ? { "If-Match": `"${ticket.version}"` } : {}, body: JSON.stringify({ title, description, status, assignee }) }, readTicket);
       ticket = saved;
+      assignee = saved.assignee;
+      observedVersion = saved.version;
       dirty = false;
       reload = false;
       if (!editing) dialog.close();
@@ -122,9 +166,29 @@
     try {
       const result = await api(`${ticketPath(project.id, ticket.id)}/comments`, { method: "POST", headers: { "If-Match": `"${ticket.version}"` }, body: JSON.stringify({ body: commentBody }) }, readCommentResult);
       ticket = { ...ticket, version: result.ticket_version };
+      observedVersion = result.ticket_version;
       commentBody = "";
       await Promise.all([loadComments(), loadHistory()]);
     } catch (failure) { commentError = failureMessage(failure); }
+    finally { pending = false; }
+  }
+  async function toggleArchive(): Promise<void> {
+    if (pending || !project || !ticket) return;
+    if (dirty) { ticketError = "Save or discard your ticket edits before archiving or restoring."; return; }
+    const selected = project;
+    const current = ticket;
+    if (!current.archived && !confirm(`Archive ${selected.key}-${current.id}? Its description, comments, and history will be kept.`)) return;
+    pending = true;
+    ticketError = "";
+    try {
+      const saved = await api(ticketPath(selected.id, current.id), { method: "PATCH", headers: { "If-Match": `"${current.version}"` }, body: JSON.stringify({ archived: !current.archived }) }, readTicket);
+      ticket = saved;
+      observedVersion = saved.version;
+      reload = false;
+      await onsaved(selected.id);
+      await loadHistory(false, history.length);
+      notify(saved.archived ? "Ticket archived. Nothing was deleted." : "Ticket restored.");
+    } catch (failure) { ticketError = failureMessage(failure); }
     finally { pending = false; }
   }
   function beforeunload(event: BeforeUnloadEvent): void {
@@ -135,10 +199,12 @@
 
 <svelte:window onbeforeunload={beforeunload} />
 <dialog id="ticket-dialog" class="ticket-dialog" bind:this={dialog} oncancel={(event) => { event.preventDefault(); close(); }}>
-  <div class="ticket-top"><span id="ticket-reference" class="mono muted">{ticket && project ? `${project.key}-${ticket.id}` : "NEW TICKET"}</span><button id="close-ticket" class="icon-button" aria-label="Close ticket" disabled={pending} onclick={close}><Icon name="close" /></button></div>
+  <div class="ticket-top"><span id="ticket-reference" class="mono muted">{ticket && project ? `${project.key}-${ticket.id}` : "NEW TICKET"}</span><div class="ticket-top-actions"><button id="archive-ticket" class="quiet" hidden={!ticket} disabled={pending} onclick={() => run(toggleArchive)}><Icon name={ticket?.archived ? "restore" : "archive"} />{ticket?.archived ? "Restore" : "Archive"}</button><button id="close-ticket" class="icon-button" aria-label="Close ticket" disabled={pending} onclick={close}><Icon name="close" /></button></div></div>
+  <p id="ticket-archived-banner" class="archived-banner" hidden={!ticket?.archived}><Icon name="archive" /> Archived ticket. Its description, comments, and history are retained.</p>
   <form id="ticket-form" oninput={() => { dirty = true; }} onsubmit={(event) => run(() => save(event))}>
     <label class="sr-only" for="ticket-title">Ticket title</label><textarea id="ticket-title" bind:this={titleInput} bind:value={title} class="ticket-title" rows="2" maxlength="200" required placeholder="What needs to happen?" disabled={pending}></textarea>
     <label class="status-label">Status<select id="ticket-status" bind:value={status} required disabled={pending}>{#each project?.statuses ?? [] as name}<option value={name}>{name}</option>{/each}</select></label>
+    <label>Assignee<input id="ticket-assignee" bind:value={assignee} maxlength={ASSIGNEE_BYTES_MAX} placeholder="Unassigned" autocomplete="off" disabled={pending}><small>Free-text name, no account required. Leave empty to unassign.</small></label>
     <label>Description<textarea id="ticket-description" bind:value={description} rows="7" maxlength="16000" placeholder="Add context, requirements, or acceptance criteria…" disabled={pending}></textarea><small>Plain text. URLs and code stay exactly as written.</small></label>
     <p id="ticket-error" class="form-error" role="alert">{ticketError}</p>
     <div class="form-actions"><button id="reload-ticket" class="quiet" type="button" hidden={!reload} disabled={pending} onclick={() => { if (project && ticket) run(() => open(project!, ticket!.id)); }}>Reload latest</button><button id="save-ticket" type="submit" class="primary" disabled={pending}>{ticket ? "Save changes" : "Create ticket"}</button></div>

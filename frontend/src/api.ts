@@ -3,6 +3,7 @@ export const TICKETS_VISIBLE_MAX = 1000;
 export const ACTIVITY_VISIBLE_MAX = 500;
 export const STATUSES_MAX = 12;
 export const STATUS_BYTES_MAX = 100;
+export const ASSIGNEE_BYTES_MAX = 100;
 export const DEFAULT_STATUSES = ["To Do", "In Progress", "Blocked", "In Review", "Done"];
 const REQUEST_TIMEOUT_MS = 10000;
 
@@ -13,6 +14,7 @@ export interface Project {
   statuses: string[];
   version: number;
   created_at: string;
+  archived: boolean;
 }
 export interface Ticket {
   id: number;
@@ -23,6 +25,8 @@ export interface Ticket {
   version: number;
   created_at: string;
   updated_at: string;
+  archived: boolean;
+  assignee: string;
 }
 export interface Comment {
   id: number;
@@ -61,11 +65,13 @@ function integer(value: unknown, minimum = 1): number {
 export function readProject(value: unknown): Project {
   const item = record(value);
   if (!Array.isArray(item.statuses) || item.statuses.length < 1 || item.statuses.length > STATUSES_MAX) throw new Error("Invalid project statuses");
-  return { id: integer(item.id), name: text(item.name), key: text(item.key), statuses: item.statuses.map(text), version: integer(item.version), created_at: text(item.created_at) };
+  if (typeof item.archived !== "boolean") throw new Error("Invalid project archive state");
+  return { id: integer(item.id), name: text(item.name), key: text(item.key), statuses: item.statuses.map(text), version: integer(item.version), created_at: text(item.created_at), archived: item.archived };
 }
 export function readTicket(value: unknown): Ticket {
   const item = record(value);
-  return { id: integer(item.id), project_id: integer(item.project_id), title: text(item.title), description: text(item.description), status: text(item.status), version: integer(item.version), created_at: text(item.created_at), updated_at: text(item.updated_at) };
+  if (typeof item.archived !== "boolean") throw new Error("Invalid ticket archive state");
+  return { id: integer(item.id), project_id: integer(item.project_id), title: text(item.title), description: text(item.description), status: text(item.status), version: integer(item.version), created_at: text(item.created_at), updated_at: text(item.updated_at), archived: item.archived, assignee: text(item.assignee) };
 }
 export function readComment(value: unknown): Comment {
   const item = record(value);

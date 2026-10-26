@@ -371,21 +371,28 @@ func (server *Server) updateProject(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	var input struct {
-		Name     string   `json:"name"`
+		Name     *string  `json:"name"`
 		Statuses []string `json:"statuses"`
+		Archived *bool    `json:"archived"`
 	}
 	if err := decode(writer, request, &input); err != nil {
 		server.fail(writer, err)
 		return
 	}
-	input.Name = strings.TrimSpace(input.Name)
-	if !validText(input.Name, NameBytesMax, true) {
-		server.fail(writer, &problem{400, "Project name required (100 bytes max)"})
+	if (input.Name == nil) != (input.Statuses == nil) || (input.Name == nil && input.Archived == nil) {
+		server.fail(writer, &problem{400, "Provide name and statuses together, or an archived flag"})
 		return
 	}
-	if err := validateStatuses(input.Statuses); err != nil {
-		server.fail(writer, err)
-		return
+	if input.Name != nil {
+		*input.Name = strings.TrimSpace(*input.Name)
+		if !validText(*input.Name, NameBytesMax, true) {
+			server.fail(writer, &problem{400, "Project name required (100 bytes max)"})
+			return
+		}
+		if err := validateStatuses(input.Statuses); err != nil {
+			server.fail(writer, err)
+			return
+		}
 	}
 	label, err := actor(request)
 	if err != nil {
@@ -400,6 +407,13 @@ func (server *Server) updateProject(writer http.ResponseWriter, request *http.Re
 		if project.Version != version {
 			return nil, conflict
 		}
+		if input.Name != nil {
+			project.Name = *input.Name
+			project.Statuses = input.Statuses
+		}
+		if input.Archived != nil {
+			project.Archived = *input.Archived
+		}
 		rows, err := transaction.QueryContext(request.Context(), "SELECT DISTINCT status FROM tickets WHERE project_id=? LIMIT ?", projectID, StatusesMax)
 		if err != nil {
 			return nil, err
@@ -410,7 +424,7 @@ func (server *Server) updateProject(writer http.ResponseWriter, request *http.Re
 				rows.Close()
 				return nil, err
 			}
-			if !slices.Contains(input.Statuses, status) {
+			if !slices.Contains(project.Statuses, status) {
 				rows.Close()
 				return nil, &problem{409, "Move tickets before removing their status"}
 			}
@@ -419,15 +433,13 @@ func (server *Server) updateProject(writer http.ResponseWriter, request *http.Re
 		if err != nil {
 			return nil, err
 		}
-		statuses, err := json.Marshal(input.Statuses)
+		statuses, err := json.Marshal(project.Statuses)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := transaction.ExecContext(request.Context(), "UPDATE projects SET name=?,statuses=?,version=version+1 WHERE id=?", input.Name, string(statuses), projectID); err != nil {
+		if _, err := transaction.ExecContext(request.Context(), "UPDATE projects SET name=?,statuses=?,archived=?,version=version+1 WHERE id=?", project.Name, string(statuses), project.Archived, projectID); err != nil {
 			return nil, err
 		}
-		project.Name = input.Name
-		project.Statuses = input.Statuses
 		project.Version++
 		return project, nil
 	})
@@ -458,7 +470,15 @@ func (server *Server) tickets(writer http.ResponseWriter, request *http.Request)
 		server.fail(writer, err)
 		return
 	}
-	rows, err := server.store.database.QueryContext(request.Context(), "SELECT "+ticketColumns+" FROM tickets WHERE project_id=? AND id>? AND (?='' OR instr(lower(title),lower(?))>0) ORDER BY id LIMIT ?", projectID, after, search, search, limit)
+	archiveFilter := false
+	if value := request.URL.Query().Get("archived"); value != "" {
+		if value != "true" && value != "false" {
+			server.fail(writer, &problem{400, "archived must be true or false"})
+			return
+		}
+		archiveFilter = value == "true"
+	}
+	rows, err := server.store.database.QueryContext(request.Context(), "SELECT "+ticketColumns+" FROM tickets WHERE project_id=? AND id>? AND (?='' OR instr(lower(title),lower(?))>0) AND archived=? ORDER BY id LIMIT ?", projectID, after, search, search, archiveFilter, limit)
 	if err != nil {
 		server.fail(writer, err)
 		return
@@ -500,9 +520,17 @@ type ticketInput struct {
 	Title       *string `json:"title"`
 	Description *string `json:"description"`
 	Status      *string `json:"status"`
+	Archived    *bool   `json:"archived"`
+	Assignee    *string `json:"assignee"`
 }
 
 func validateTicket(input ticketInput) error {
+	if input.Assignee != nil {
+		*input.Assignee = strings.TrimSpace(*input.Assignee)
+		if !validText(*input.Assignee, AssigneeBytesMax, false) {
+			return &problem{400, "Assignee must fit within 100 UTF-8 bytes"}
+		}
+	}
 	if input.Title != nil && !validText(*input.Title, TitleBytesMax, true) {
 		return &problem{400, "Title required (200 bytes max)"}
 	}
@@ -524,6 +552,10 @@ func (server *Server) createTicket(writer http.ResponseWriter, request *http.Req
 	var input ticketInput
 	if err := decode(writer, request, &input); err != nil {
 		server.fail(writer, err)
+		return
+	}
+	if input.Archived != nil {
+		server.fail(writer, &problem{400, "Archive existing tickets using PATCH"})
 		return
 	}
 	if input.Title == nil {
@@ -562,13 +594,17 @@ func (server *Server) createTicket(writer http.ResponseWriter, request *http.Req
 		if input.Description != nil {
 			description = *input.Description
 		}
+		assignee := ""
+		if input.Assignee != nil {
+			assignee = *input.Assignee
+		}
 		createdAt := time.Now().UTC().Format(time.RFC3339Nano)
-		result, err := transaction.ExecContext(request.Context(), "INSERT INTO tickets(project_id,title,description,status,created_at,updated_at) VALUES(?,?,?,?,?,?)", projectID, strings.TrimSpace(*input.Title), description, status, createdAt, createdAt)
+		result, err := transaction.ExecContext(request.Context(), "INSERT INTO tickets(project_id,title,description,status,created_at,updated_at,assignee) VALUES(?,?,?,?,?,?,?)", projectID, strings.TrimSpace(*input.Title), description, status, createdAt, createdAt, assignee)
 		if err != nil {
 			return nil, err
 		}
 		id, err := result.LastInsertId()
-		return Ticket{ID: id, ProjectID: projectID, Title: strings.TrimSpace(*input.Title), Description: description, Status: status, Version: 1, CreatedAt: createdAt, UpdatedAt: createdAt}, err
+		return Ticket{ID: id, ProjectID: projectID, Title: strings.TrimSpace(*input.Title), Description: description, Status: status, Version: 1, CreatedAt: createdAt, UpdatedAt: createdAt, Assignee: assignee}, err
 	})
 	if err != nil {
 		server.fail(writer, err)
@@ -593,7 +629,7 @@ func (server *Server) updateTicket(writer http.ResponseWriter, request *http.Req
 		server.fail(writer, err)
 		return
 	}
-	if input.Title == nil && input.Description == nil && input.Status == nil {
+	if input.Title == nil && input.Description == nil && input.Status == nil && input.Archived == nil && input.Assignee == nil {
 		server.fail(writer, &problem{400, "No ticket fields supplied"})
 		return
 	}
@@ -630,9 +666,15 @@ func (server *Server) updateTicket(writer http.ResponseWriter, request *http.Req
 			}
 			ticket.Status = *input.Status
 		}
+		if input.Archived != nil {
+			ticket.Archived = *input.Archived
+		}
+		if input.Assignee != nil {
+			ticket.Assignee = *input.Assignee
+		}
 		ticket.Version++
 		ticket.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-		_, err = transaction.ExecContext(request.Context(), "UPDATE tickets SET title=?,description=?,status=?,version=?,updated_at=? WHERE project_id=? AND id=?", ticket.Title, ticket.Description, ticket.Status, ticket.Version, ticket.UpdatedAt, projectID, ticketID)
+		_, err = transaction.ExecContext(request.Context(), "UPDATE tickets SET title=?,description=?,status=?,version=?,updated_at=?,archived=?,assignee=? WHERE project_id=? AND id=?", ticket.Title, ticket.Description, ticket.Status, ticket.Version, ticket.UpdatedAt, ticket.Archived, ticket.Assignee, projectID, ticketID)
 		return ticket, err
 	})
 	if err != nil {
@@ -758,7 +800,17 @@ func (server *Server) events(writer http.ResponseWriter, request *http.Request) 
 			return
 		}
 	}
-	rows, err := server.store.database.QueryContext(request.Context(), "SELECT id,project_id,ticket_id,kind,actor,data,created_at FROM events WHERE project_id=? AND (?=0 OR ticket_id=?) AND id>? ORDER BY id LIMIT ?", projectID, ticketID, ticketID, after, limit)
+	query := "SELECT id,project_id,ticket_id,kind,actor,data,created_at FROM events WHERE project_id=? AND (?=0 OR ticket_id=?) AND id>? ORDER BY id LIMIT ?"
+	arguments := []any{projectID, ticketID, ticketID, after, limit}
+	if tail := request.URL.Query().Get("tail"); tail != "" {
+		if tail != "true" || ticketID != 0 || after != 0 {
+			server.fail(writer, &problem{400, "tail=true is only supported on project events without an after cursor"})
+			return
+		}
+		query = "SELECT * FROM (SELECT id,project_id,ticket_id,kind,actor,data,created_at FROM events WHERE project_id=? ORDER BY id DESC LIMIT ?) ORDER BY id"
+		arguments = []any{projectID, limit}
+	}
+	rows, err := server.store.database.QueryContext(request.Context(), query, arguments...)
 	if err != nil {
 		server.fail(writer, err)
 		return

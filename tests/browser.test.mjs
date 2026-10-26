@@ -241,13 +241,19 @@ test("workflow editor: preview, inline rows, ordering, bounds, validation, and p
     await browser("set", "viewport", "1280", "720");
     await browser("click", "#workflow-toggle");
     await check("document.querySelectorAll('.status-name').length === 5 && !document.getElementById('workflow-editor').hidden", "Customize should reveal inline status rows");
+    await check("document.querySelectorAll('.status-default').length === 1 && document.querySelector('.status-row:first-child .status-default')?.textContent === 'Default'", "The first status should have one clear default indicator");
+    await check("document.getElementById('workflow-default-help').textContent.includes('New tickets') && document.querySelector('.status-name').getAttribute('aria-describedby').includes('workflow-default-help')", "The default status should explain where new tickets start");
+    await check("document.querySelector('.workflow-heading #status-count').textContent === '5 / 12'", "Status capacity should be visible in the section heading");
+    await check("document.getElementById('workflow-toggle').textContent.includes('Collapse')", "Expanded workflow should have a clear collapse action");
     await check("document.querySelector('.status-up').disabled && document.querySelector('.status-row:last-child .status-down').disabled", "Boundary reorder controls should be disabled");
     await browser("fill", ".status-row:first-child .status-name", "Ideas");
     await browser("click", ".status-row:first-child .status-down");
     await check("document.querySelectorAll('.status-name')[1].value === 'Ideas'", "Moving a status must retain its edited name");
+    await check("document.querySelector('.status-row:first-child .status-name').value === 'In Progress' && document.querySelector('.status-row:first-child .status-default')?.textContent === 'Default'", "Default indicator should follow the first position after reordering");
     await browser("click", ".status-row:nth-child(2) .status-up");
     await check("document.querySelector('.status-name').value === 'Ideas'", "Moving a status up must retain its edited name");
-    await browser("click", ".status-row:first-child .status-down");
+    await browser("eval", "document.querySelector('.status-row:first-child .status-down').focus(); true");
+    await browser("press", "Enter");
     await browser("fill", ".status-row:first-child .status-name", "In Review");
     await browser("click", "#workflow-toggle");
     await browser("click", "#save-project");
@@ -289,7 +295,8 @@ test("workflow editor: preview, inline rows, ordering, bounds, validation, and p
     await browser("wait", "--fn", "location.pathname === '/projects/1'");
     const expected = ["Queued", "Ideas", "Blocked", "In Review", "Shipped"];
     assert.deepEqual((await request(server.origin, "/api/projects/1")).statuses, expected);
-    await request(server.origin, "/api/projects/1/tickets", "POST", { title: "Keep this status in use", status: "Queued" });
+    const defaultTicket = await request(server.origin, "/api/projects/1/tickets", "POST", { title: "Keep this status in use" });
+    assert.equal(defaultTicket.status, expected[0], "New tickets should start in the first saved status");
     await browser("click", "#project-settings");
     await check("!document.getElementById('workflow-editor').hidden && document.querySelector('.status-name').value === 'Queued'", "Project settings should open the saved editor directly");
     await browser("fill", ".status-row:first-child .status-name", "Removed name");
@@ -345,6 +352,380 @@ test("Svelte ticket panel: stale writes require reload and keep the authoritativ
     await browser("click", "#post-comment");
     await browser("wait", "--fn", "document.querySelector('.comment-body')?.textContent === 'Reviewed after reload'");
     assert.equal((await request(server.origin, path)).version, authoritative.version + 1);
+  } finally {
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+async function grantClipboardRead(browser, origin) {
+  const connection = JSON.parse(await browser("get", "cdp-url", "--json"));
+  assert.equal(connection.success, true);
+  assert.ok(connection.data.cdpUrl.startsWith("ws://127.0.0.1:"));
+  const socket = new WebSocket(connection.data.cdpUrl);
+  try {
+    await once(socket, "open", { signal: AbortSignal.timeout(requestTimeoutMs) });
+    const command = async (id, method, parameters) => {
+      const received = once(socket, "message", { signal: AbortSignal.timeout(requestTimeoutMs) });
+      socket.send(JSON.stringify({ id, method, params: parameters }));
+      const [message] = await received;
+      const response = JSON.parse(message.data);
+      assert.equal(response.id, id);
+      assert.equal(response.error, undefined);
+      return response.result;
+    };
+    const targets = await command(1, "Target.getTargets", {});
+    const target = targets.targetInfos.find((item) => item.url.startsWith(origin + "/"));
+    assert.ok(target, "Disposable application tab must exist");
+    await command(2, "Browser.grantPermissions", { origin, permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"], ...(target.browserContextId ? { browserContextId: target.browserContextId } : {}) });
+    // Chromium removes this permission override when its CDP connection closes.
+    return socket;
+  } catch (error) { socket.close(); throw error; }
+}
+
+test("project actions: copy stable URL, delete-to-archive from settings, and restore", { timeout: 45000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-project-actions-"));
+  const session = `docket-actions-${process.pid}`;
+  let clipboardConnection;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  try {
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Keep this project", key: "KEEP" });
+    const ticket = await request(server.origin, `/api/projects/${project.id}/tickets`, "POST", { title: "Keep this ticket" });
+    const commentsPath = `/api/projects/${project.id}/tickets/${ticket.id}/comments`;
+    await request(server.origin, commentsPath, "POST", { body: "Keep this discussion" }, ticket.version);
+    const comments = await request(server.origin, commentsPath);
+    const url = `${server.origin}/projects/${project.id}`;
+    await browser("open", url);
+    assert.match(await browser("eval", `(() => {
+      if (!document.getElementById('copy-project-url')) throw new Error('Copy project URL action is missing');
+      if (document.querySelector('.header-actions #archive-project')) throw new Error('Project deletion should be in settings, not the header');
+      return 'PASS';
+    })()`), /PASS/);
+    clipboardConnection = await grantClipboardRead(browser, server.origin);
+    await browser("click", "#copy-project-url");
+    assert.ok((await browser("clipboard", "read")).includes(url), "Clipboard should contain the stable project URL");
+    await browser("eval", "Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => { throw new Error('Clipboard unavailable'); } } }); true");
+    await browser("click", "#copy-project-url");
+    await browser("wait", "--fn", "document.getElementById('copy-link-dialog').open");
+    assert.match(await browser("eval", "document.getElementById('project-url').value"), new RegExp(url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    await browser("click", "#close-copy-link");
+    await browser("click", "#project-settings");
+    await browser("eval", "window.confirm = () => false; true");
+    await browser("click", "#archive-project");
+    assert.equal((await request(server.origin, `/api/projects/${project.id}`)).archived, false);
+    await browser("eval", "window.confirm = () => true; true");
+    await browser("click", "#archive-project");
+    await browser("wait", "--fn", "!document.getElementById('archived-banner').hidden");
+    assert.equal((await request(server.origin, `/api/projects/${project.id}`)).archived, true);
+    assert.deepEqual(await request(server.origin, commentsPath), comments);
+    await browser("click", "#active-projects");
+    await browser("wait", "--fn", "document.querySelectorAll('.project-link').length === 0");
+    await browser("click", "#archived-projects");
+    await browser("wait", "--fn", "document.querySelectorAll('.project-link').length === 1");
+    await browser("open", url);
+    await browser("wait", "--fn", "!document.getElementById('archived-banner').hidden");
+    await browser("click", "#project-settings");
+    await browser("click", "#archive-project");
+    await browser("wait", "--fn", "document.getElementById('archived-banner').hidden");
+    const restored = await request(server.origin, `/api/projects/${project.id}`);
+    assert.equal(restored.archived, false);
+    assert.equal(restored.id, project.id);
+    assert.equal(restored.key, project.key);
+    assert.equal((await request(server.origin, "/api/projects")).items.length, 1);
+    assert.deepEqual(await request(server.origin, commentsPath), comments);
+    await browser("set", "viewport", "390", "844");
+    assert.match(await browser("eval", `(() => {
+      for (const id of ['copy-project-url', 'project-settings', 'archived-projects']) {
+        const bounds = document.getElementById(id).getBoundingClientRect();
+        if (bounds.width <= 0 || bounds.left < 0 || bounds.right > innerWidth) throw new Error('Project action is offscreen: ' + id);
+      }
+      return 'PASS';
+    })()`), /PASS/);
+  } finally {
+    clipboardConnection?.close();
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("live updates: external changes sync without reload or losing drafts and pagination", { timeout: 60000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-live-"));
+  const session = `docket-live-${process.pid}`;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  try {
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Live board", key: "LIVE" });
+    const ticket = await request(server.origin, `/api/projects/${project.id}/tickets`, "POST", { title: "Initial title" });
+    for (let i = 0; i < 100; i++) await request(server.origin, `/api/projects/${project.id}/tickets`, "POST", { title: `Other ticket ${i}` });
+    const path = `/api/projects/${project.id}/tickets/${ticket.id}`;
+    await browser("open", `${server.origin}/projects/${project.id}`);
+    await browser("wait", ".ticket-card");
+    await browser("eval", "window.liveDocumentMarker = 'same-document'; true");
+    await browser("click", "#load-tickets");
+    await browser("wait", "--fn", "document.querySelectorAll('.ticket-card').length === 101");
+    await request(server.origin, path, "PATCH", { title: "Updated from API" }, ticket.version);
+    await browser("wait", "--fn", "document.querySelector('.card-title')?.textContent === 'Updated from API'");
+    assert.match(await browser("eval", "document.querySelectorAll('.ticket-card').length"), /101/);
+    await browser("click", ".ticket-card");
+    await browser("wait", "--fn", "document.getElementById('ticket-dialog').open");
+    const current = await request(server.origin, path);
+    await request(server.origin, path, "PATCH", { description: "Fresh description" }, current.version);
+    await browser("wait", "--fn", "document.getElementById('ticket-description').value === 'Fresh description'");
+    await browser("fill", "#ticket-title", "Unsaved local title");
+    await browser("fill", "#comment-body", "Unsent local comment");
+    const latest = await request(server.origin, path);
+    const changed = await request(server.origin, path, "PATCH", { title: "Authoritative remote title" }, latest.version);
+    await request(server.origin, path + "/comments", "POST", { body: "Remote discussion update" }, changed.version);
+    await browser("wait", "--fn", "document.querySelector('.comment-body')?.textContent === 'Remote discussion update'");
+    assert.match(await browser("eval", `(() => {
+      if (document.getElementById('ticket-title').value !== 'Unsaved local title') throw new Error('Live update erased ticket draft');
+      if (document.getElementById('comment-body').value !== 'Unsent local comment') throw new Error('Live update erased comment draft');
+      if (document.getElementById('reload-ticket').hidden) throw new Error('Changed draft needs a reload action');
+      if (document.querySelectorAll('.ticket-card').length !== 101) throw new Error('Live update reset pagination');
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("click", "#save-ticket");
+    await browser("wait", "--fn", "document.getElementById('ticket-error').textContent.includes('Changed since')");
+    assert.equal((await request(server.origin, path)).title, "Authoritative remote title");
+    await request(server.origin, `/api/projects/${project.id}`, "PATCH", { archived: true }, project.version);
+    await browser("wait", "--fn", "!document.getElementById('archived-banner').hidden");
+    await request(server.origin, "/api/projects", "POST", { name: "Another live project", key: "NEXT" });
+    await browser("wait", "--fn", "document.getElementById('active-projects').textContent.includes('1')");
+    await browser("eval", "window.confirm = () => true; true");
+    await browser("click", "#close-ticket");
+    await browser("fill", "#search", "Authoritative");
+    await browser("wait", "--fn", "document.querySelectorAll('.ticket-card').length === 1");
+    const searchable = await request(server.origin, path);
+    await request(server.origin, path, "PATCH", { title: "Authoritative revised" }, searchable.version);
+    await browser("wait", "--fn", "document.querySelector('.card-title')?.textContent === 'Authoritative revised'");
+    assert.match(await browser("eval", `(() => {
+      if (window.liveDocumentMarker !== 'same-document') throw new Error('Live sync reloaded the page');
+      if (document.getElementById('search').value !== 'Authoritative') throw new Error('Live sync erased search');
+      if (document.querySelectorAll('.ticket-card').length !== 1) throw new Error('Live sync lost the search filter');
+      return 'PASS';
+    })()`), /PASS/);
+    const archivable = await request(server.origin, path);
+    const archived = await request(server.origin, path, "PATCH", { archived: true }, archivable.version);
+    await browser("wait", "--fn", "document.querySelectorAll('.ticket-card').length === 0");
+    await browser("click", "#archived-tickets");
+    await browser("wait", ".ticket-card");
+    await request(server.origin, path, "PATCH", { archived: false }, archived.version);
+    await browser("wait", "--fn", "document.querySelectorAll('.ticket-card').length === 0");
+    await browser("click", "#active-tickets");
+    await browser("wait", ".ticket-card");
+  } finally {
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("ticket archive: reversible removal keeps records and unsent comments", { timeout: 45000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-ticket-archive-"));
+  const session = `docket-ticket-archive-${process.pid}`;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  try {
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Ticket archive", key: "TARC" });
+    const ticket = await request(server.origin, `/api/projects/${project.id}/tickets`, "POST", { title: "Retain this ticket", description: "Retain the description" });
+    const path = `/api/projects/${project.id}/tickets/${ticket.id}`;
+    await request(server.origin, path + "/comments", "POST", { body: "Retain this comment" }, ticket.version);
+    const comments = await request(server.origin, path + "/comments");
+    await browser("open", `${server.origin}/projects/${project.id}`);
+    await browser("click", ".ticket-card");
+    await browser("wait", "--fn", "document.getElementById('ticket-dialog').open");
+    assert.match(await browser("eval", `(() => {
+      if (!document.getElementById('archive-ticket')) throw new Error('Ticket archive action is missing');
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("fill", "#comment-body", "Unsent comment survives archiving");
+    await browser("eval", "window.confirm = () => false; true");
+    await browser("click", "#archive-ticket");
+    assert.equal((await request(server.origin, path)).archived, false);
+    await browser("eval", "window.confirm = () => true; true");
+    await browser("click", "#archive-ticket");
+    await browser("wait", "--fn", "!document.getElementById('ticket-archived-banner').hidden");
+    assert.match(await browser("eval", "document.getElementById('comment-body').value"), /Unsent comment survives archiving/);
+    assert.equal((await request(server.origin, path)).archived, true);
+    assert.deepEqual((await request(server.origin, `/api/projects/${project.id}/tickets`)).items, [], "The API must exclude archived tickets without a filter");
+    assert.deepEqual((await request(server.origin, `/api/projects/${project.id}/tickets?archived=true`)).items.map((item) => item.id), [ticket.id], "Archived tickets must require an explicit API filter");
+    assert.deepEqual(await request(server.origin, path + "/comments"), comments);
+    await browser("click", "#close-ticket");
+    await browser("wait", "--fn", "document.querySelectorAll('.ticket-card').length === 0");
+    await browser("click", "#archived-tickets");
+    await browser("wait", ".ticket-card");
+    await browser("click", ".ticket-card");
+    await browser("wait", "--fn", "!document.getElementById('ticket-archived-banner').hidden");
+    await browser("click", "#archive-ticket");
+    await browser("wait", "--fn", "document.getElementById('ticket-archived-banner').hidden");
+    await browser("click", "#close-ticket");
+    await browser("click", "#active-tickets");
+    await browser("wait", ".ticket-card");
+    const restored = await request(server.origin, path);
+    assert.equal(restored.archived, false);
+    assert.equal(restored.id, ticket.id);
+    assert.equal(restored.title, ticket.title);
+    assert.equal(restored.description, ticket.description);
+    assert.deepEqual(await request(server.origin, path + "/comments"), comments);
+    assert.equal((await request(server.origin, path + "/history")).items.length, 4);
+    await browser("click", ".ticket-card");
+    await browser("fill", "#ticket-title", "Unsaved changes");
+    await browser("click", "#archive-ticket");
+    await browser("wait", "--fn", "document.getElementById('ticket-error').textContent.includes('Save or discard')");
+    assert.equal((await request(server.origin, path)).archived, false);
+  } finally {
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("assignee: free-text create, edit, clear, safe rendering, and live draft preservation", { timeout: 45000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-assignee-"));
+  const session = `docket-assignee-${process.pid}`;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  try {
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Assignments", key: "WHO" });
+    await browser("open", `${server.origin}/projects/${project.id}`);
+    await browser("click", "#new-ticket");
+    assert.match(await browser("eval", `(() => {
+      const input = document.getElementById('ticket-assignee');
+      if (!input) throw new Error('Free-text assignee field is missing');
+      if (input.value !== '') throw new Error('New tickets should be unassigned');
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("fill", "#ticket-title", "Assigned ticket");
+    await browser("fill", "#ticket-assignee", "  Morgan  ");
+    await browser("click", "#save-ticket");
+    await browser("wait", "--fn", "document.querySelector('.card-assignee span')?.textContent === 'Morgan'");
+    const created = (await request(server.origin, `/api/projects/${project.id}/tickets`)).items[0];
+    assert.equal(created.assignee, "Morgan");
+    const path = `/api/projects/${project.id}/tickets/${created.id}`;
+    await browser("click", ".ticket-card");
+    await browser("fill", "#ticket-assignee", "Casey");
+    await browser("click", "#save-ticket");
+    await browser("wait", "--fn", "!document.getElementById('save-ticket').disabled");
+    const saved = await request(server.origin, path);
+    assert.equal(saved.assignee, "Casey");
+    await request(server.origin, path, "PATCH", { assignee: "Remote owner" }, saved.version);
+    await browser("wait", "--fn", "document.getElementById('ticket-assignee').value === 'Remote owner'");
+    await browser("fill", "#ticket-assignee", "Unsaved assignee");
+    await browser("fill", "#comment-body", "Unsent assignment note");
+    const remote = await request(server.origin, path);
+    await request(server.origin, path, "PATCH", { assignee: "Authoritative owner" }, remote.version);
+    await browser("wait", "--fn", "!document.getElementById('reload-ticket').hidden");
+    assert.match(await browser("eval", `(() => {
+      if (document.getElementById('ticket-assignee').value !== 'Unsaved assignee') throw new Error('Live sync erased assignee draft');
+      if (document.getElementById('comment-body').value !== 'Unsent assignment note') throw new Error('Live sync erased comment');
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("click", "#save-ticket");
+    await browser("wait", "--fn", "document.getElementById('ticket-error').textContent.includes('Changed since')");
+    assert.equal((await request(server.origin, path)).assignee, "Authoritative owner");
+    await browser("eval", "window.confirm = () => true; true");
+    await browser("click", "#reload-ticket");
+    await browser("wait", "--fn", "document.getElementById('ticket-assignee').value === 'Authoritative owner'");
+    await browser("fill", "#ticket-assignee", "");
+    await browser("click", "#save-ticket");
+    await browser("wait", "--fn", "!document.getElementById('save-ticket').disabled");
+    assert.equal((await request(server.origin, path)).assignee, "");
+    const literal = "<img src=x onerror=window.assignmentExecuted=true>";
+    await browser("fill", "#ticket-assignee", literal);
+    await browser("click", "#save-ticket");
+    await browser("wait", "--fn", "!document.getElementById('save-ticket').disabled");
+    await browser("click", "#close-ticket");
+    await browser("click", "#list-view");
+    assert.match(await browser("eval", `(() => {
+      if (document.querySelector('.list-assignee').textContent !== ${JSON.stringify(literal)}) throw new Error('Assignee not displayed literally in list');
+      if (document.querySelector('.list-assignee img') || window.assignmentExecuted) throw new Error('Assignee executed as HTML');
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("set", "viewport", "390", "844");
+    assert.match(await browser("eval", `(() => {
+      const bounds = document.querySelector('.list-assignee').getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.left < 0 || bounds.right > innerWidth) throw new Error('Assignee column is offscreen on phone');
+      return 'PASS';
+    })()`), /PASS/);
+  } finally {
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("project settings: gear entry, delete-to-archive help, cancellation, stale restore, and phone layout", { timeout: 45000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-settings-"));
+  const session = `docket-settings-${process.pid}`;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  try {
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Settings example", key: "PREF" });
+    await browser("open", `${server.origin}/projects/${project.id}`);
+    await browser("wait", "#project-settings");
+    assert.match(await browser("eval", `(() => {
+      const button = document.getElementById('project-settings');
+      if (button.textContent.trim() || !button.querySelector('use')?.getAttribute('href').endsWith('#settings')) throw new Error('Project settings should use a gear icon, not text');
+      if (button.getAttribute('aria-label') !== 'Project settings' || button.title !== 'Project settings') throw new Error('Gear action needs an accessible label and tooltip');
+      if (document.querySelector('.header-actions #archive-project')) throw new Error('Delete should not be in the board header');
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("click", "#project-settings");
+    await browser("wait", "--fn", "document.getElementById('project-dialog').open");
+    assert.match(await browser("eval", `(() => {
+      const button = document.getElementById('archive-project');
+      if (!document.getElementById('project-form').contains(button) || button.type !== 'button') throw new Error('Delete action must live in settings without submitting edits');
+      if (!button.textContent.includes('Delete project')) throw new Error('Delete action label is missing');
+      const help = document.getElementById(button.getAttribute('aria-describedby')).textContent.toLowerCase();
+      if (!help.includes('archived') || !help.includes('restore') || !help.includes('history')) throw new Error('Delete helper must explain reversible archival and retained history');
+      return 'PASS';
+    })()`), /PASS/);
+    const screenshots = process.env.DOCKET_SCREENSHOTS;
+    if (screenshots) {
+      await mkdir(screenshots, { recursive: true });
+      await browser("set", "viewport", "1440", "1000");
+      await browser("screenshot", join(screenshots, "project-settings-desktop.png"));
+      await browser("set", "viewport", "1280", "720");
+    }
+    await browser("fill", "#project-title", "Unsaved settings name");
+    await browser("eval", "window.confirm = message => { window.lastConfirmation = message; return false; }; true");
+    await browser("click", "#archive-project");
+    assert.deepEqual(await request(server.origin, `/api/projects/${project.id}`), project);
+    assert.match(await browser("eval", "document.getElementById('project-title').value"), /Unsaved settings name/);
+    await browser("fill", "#project-title", "");
+    await browser("eval", "window.confirm = message => { window.lastConfirmation = message; return true; }; true");
+    await browser("click", "#archive-project");
+    await browser("wait", "--fn", "!document.getElementById('project-dialog').open && !document.getElementById('archived-banner').hidden");
+    assert.match(await browser("eval", "window.lastConfirmation"), /unsaved/i);
+    const archived = await request(server.origin, `/api/projects/${project.id}`);
+    assert.equal(archived.archived, true);
+    assert.equal(archived.name, project.name, "Delete should not silently save unsaved settings");
+    await browser("click", "#project-settings");
+    const changed = await request(server.origin, `/api/projects/${project.id}`, "PATCH", { name: "Updated elsewhere", statuses: archived.statuses }, archived.version);
+    await browser("wait", "--fn", "document.getElementById('project-name').textContent === 'Updated elsewhere'");
+    await browser("click", "#archive-project");
+    await browser("wait", "--fn", "document.getElementById('project-error').textContent.includes('Changed since')");
+    assert.equal((await request(server.origin, `/api/projects/${project.id}`)).version, changed.version);
+    assert.equal((await request(server.origin, `/api/projects/${project.id}`)).archived, true);
+    await browser("click", "#cancel-project");
+    await browser("click", "#project-settings");
+    assert.match(await browser("eval", "document.getElementById('archive-project').textContent"), /Restore project/);
+    await browser("click", "#archive-project");
+    await browser("wait", "--fn", "!document.getElementById('project-dialog').open && document.getElementById('archived-banner').hidden");
+    assert.equal((await request(server.origin, `/api/projects/${project.id}`)).archived, false);
+    await browser("set", "viewport", "390", "844");
+    await browser("click", "#project-settings");
+    await browser("eval", "document.getElementById('project-lifecycle').scrollIntoView({block:'nearest'}); true");
+    assert.match(await browser("eval", `(() => {
+      for (const id of ['archive-project', 'save-project', 'cancel-project']) {
+        const bounds = document.getElementById(id).getBoundingClientRect();
+        if (bounds.width <= 0 || bounds.left < 0 || bounds.right > innerWidth || bounds.top < 0 || bounds.bottom > innerHeight) throw new Error('Settings control is offscreen on phone: ' + id);
+      }
+      return 'PASS';
+    })()`), /PASS/);
+    if (screenshots) await browser("screenshot", join(screenshots, "project-settings-phone.png"));
+    await browser("eval", "window.confirm = () => false; true");
+    await browser("click", "#archive-project");
+    assert.equal((await request(server.origin, `/api/projects/${project.id}`)).archived, false);
+    await browser("click", "#cancel-project");
+    await browser("click", "#add-project");
+    assert.match(await browser("eval", `(() => {
+      if (document.getElementById('archive-project')) throw new Error('New-project form must not offer deletion');
+      return 'PASS';
+    })()`), /PASS/);
   } finally {
     try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
   }
