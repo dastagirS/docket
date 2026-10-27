@@ -730,3 +730,234 @@ test("project settings: gear entry, delete-to-archive help, cancellation, stale 
     try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
   }
 });
+
+test("board drag: native status moves, no-op and cancelled drops, retained records, and editor fallback", { timeout: 45000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-board-drag-"));
+  const session = `docket-drag-${process.pid}`;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  try {
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Drag board", key: "DRAG", statuses: ["Queue", "Building", "Review"] });
+    const ticket = await request(server.origin, `/api/projects/${project.id}/tickets`, "POST", { title: "Move this ticket", description: "Keep this description", assignee: "Morgan" });
+    const path = `/api/projects/${project.id}/tickets/${ticket.id}`;
+    const posted = await request(server.origin, path + "/comments", "POST", { body: "Keep the discussion" }, ticket.version);
+    const comments = await request(server.origin, path + "/comments");
+    const targetTicket = await request(server.origin, `/api/projects/${project.id}/tickets`, "POST", { title: "Existing destination ticket", status: "Building" });
+    await browser("set", "viewport", "1440", "1000");
+    await browser("open", `${server.origin}/projects/${project.id}`);
+    await browser("wait", ".ticket-card");
+    assert.match(await browser("eval", `(() => {
+      if (!document.querySelector('.ticket-card').draggable) throw new Error('Board tickets should support dragging');
+      document.addEventListener('dragstart', event => { window.nativeDragTrusted = event.isTrusted; });
+      document.addEventListener('drop', event => { window.highlightedDrop = event.target.closest('.column')?.classList.contains('drop-target'); }, true);
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("drag", ".ticket-card", '.column[aria-label="Queue"]');
+    assert.equal((await request(server.origin, path)).version, posted.ticket_version, "Same-column drop must not create a write");
+    await browser("drag", ".ticket-card", `[data-ticket-id="${targetTicket.id}"]`);
+    await browser("wait", "--fn", "document.querySelectorAll('.column[aria-label=\"Building\"] .ticket-card').length === 2 && document.querySelector('.ticket-card')?.disabled === false");
+    const moved = await request(server.origin, path);
+    assert.equal(moved.status, "Building");
+    assert.equal(moved.version, posted.ticket_version + 1);
+    assert.equal(moved.title, ticket.title);
+    assert.equal(moved.description, ticket.description);
+    assert.equal(moved.assignee, ticket.assignee);
+    assert.deepEqual(await request(server.origin, path + "/comments"), comments);
+    assert.deepEqual(await request(server.origin, `/api/projects/${project.id}/tickets/${targetTicket.id}`), targetTicket, "Dropping on a card must not modify the destination ticket");
+    const history = await request(server.origin, path + "/history");
+    assert.equal(history.items.at(-1).kind, "ticket.updated");
+    assert.equal(history.items.at(-1).data.status, "Building");
+    assert.match(await browser("eval", `(() => {
+      if (window.nativeDragTrusted !== true) throw new Error('Test must exercise a native drag, not synthetic DOM events');
+      if (!window.highlightedDrop) throw new Error('Valid drop target was not highlighted');
+      if (document.getElementById('ticket-dialog').open) throw new Error('Dragging should not open the editor');
+      if (document.querySelectorAll('.dragging,.drop-target').length) throw new Error('Drag styling was not cleaned up');
+      if (document.querySelector('.column[aria-label="Queue"] .count').textContent !== '0' || document.querySelector('.column[aria-label="Building"] .count').textContent !== '2') throw new Error('Column counts did not move with the ticket');
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("drag", ".ticket-card", ".brand");
+    assert.equal((await request(server.origin, path)).version, moved.version, "Dropping outside columns must not write");
+    assert.match(await browser("eval", "window.nativeDragTrusted === true && !document.getElementById('ticket-dialog').open && !document.querySelector('.dragging,.drop-target')"), /true/);
+    await browser("eval", "document.querySelector('.ticket-card').focus(); true");
+    await browser("press", "Enter");
+    await browser("wait", "--fn", "document.getElementById('ticket-dialog').open");
+    assert.match(await browser("eval", "document.getElementById('ticket-status').value"), /Building/);
+    await browser("click", "#close-ticket");
+    await request(server.origin, path, "PATCH", { archived: true }, moved.version);
+    await browser("click", "#archived-tickets");
+    await browser("wait", "--fn", "document.querySelector('.ticket-card') !== null && document.getElementById('content').getAttribute('aria-busy') === 'false'");
+    assert.match(await browser("eval", `(() => {
+      if (document.querySelector('.ticket-card').draggable) throw new Error('Archived tickets should not be draggable');
+      return 'PASS';
+    })()`), /PASS/);
+  } finally {
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+async function connectNativeDrag(origin, browser) {
+  const connection = JSON.parse(await browser("get", "cdp-url", "--json"));
+  assert.equal(connection.success, true);
+  assert.ok(connection.data.cdpUrl.startsWith("ws://127.0.0.1:"));
+  const socket = new WebSocket(connection.data.cdpUrl);
+  const events = new EventTarget();
+  let sequence = 0;
+  let pending;
+  let pageSession;
+  let dragData;
+  socket.addEventListener("message", (message) => {
+    try {
+      const response = JSON.parse(message.data);
+      if (response.method === "Input.dragIntercepted") {
+        dragData = response.params.data;
+        events.dispatchEvent(new Event("drag"));
+      }
+      if (pending && response.id === pending.id) {
+        clearTimeout(pending.timer);
+        const waiting = pending;
+        pending = undefined;
+        if (response.error) waiting.reject(new Error("Native drag protocol command failed"));
+        else waiting.resolve(response.result);
+      }
+    } catch (error) {
+      if (pending) { clearTimeout(pending.timer); pending.reject(error); pending = undefined; }
+      socket.close();
+    }
+  });
+  for (const event of ["error", "close"]) socket.addEventListener(event, () => {
+    if (pending) { clearTimeout(pending.timer); pending.reject(new Error("Native drag protocol disconnected")); pending = undefined; }
+  });
+  const send = (method, parameters) => new Promise((resolve, reject) => {
+    assert.equal(pending, undefined, "Only one native drag protocol command may be pending");
+    const id = ++sequence;
+    const timer = setTimeout(() => { pending = undefined; reject(new Error("Native drag protocol command timed out")); }, requestTimeoutMs);
+    pending = { id, resolve, reject, timer };
+    try { socket.send(JSON.stringify({ id, method, params: parameters, ...(pageSession ? { sessionId: pageSession } : {}) })); }
+    catch (error) { clearTimeout(timer); pending = undefined; reject(error); }
+  });
+  try {
+    await once(socket, "open", { signal: AbortSignal.timeout(requestTimeoutMs) });
+    const targets = await send("Target.getTargets", {});
+    const target = targets.targetInfos.find((item) => item.url.startsWith(origin + "/"));
+    assert.ok(target, "Disposable drag tab must exist");
+    pageSession = (await send("Target.attachToTarget", { targetId: target.targetId, flatten: true })).sessionId;
+    await send("Input.setInterceptDrags", { enabled: true });
+    return { send, events, get data() { return dragData; }, close() { socket.close(); } };
+  } catch (error) { socket.close(); throw error; }
+}
+
+test("board drag safety: frozen versions, live polling, offline recovery, and navigation scope", { timeout: 90000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-drag-safety-"));
+  const session = `docket-drag-safety-${process.pid}`;
+  let nativeDrag;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  const center = async (selector) => {
+    const result = JSON.parse(await browser("eval", `(() => {
+      const element = document.querySelector(${JSON.stringify(selector)});
+      if (!element) throw new Error('Native drag element is missing');
+      const bounds = element.getBoundingClientRect();
+      return {x: Math.floor(bounds.left + bounds.width / 2), y: Math.floor(bounds.top + bounds.height / 2)};
+    })()`, "--json"));
+    assert.equal(result.success, true);
+    assert.ok(Number.isFinite(result.data.result.x) && Number.isFinite(result.data.result.y));
+    return result.data.result;
+  };
+  try {
+    const statuses = ["Queue", "Building", "Review"];
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Drag safety", key: "SAFE", statuses });
+    const other = await request(server.origin, "/api/projects", "POST", { name: "Other board", key: "ELSE", statuses });
+    const ticket = await request(server.origin, `/api/projects/${project.id}/tickets`, "POST", { title: "Frozen drag snapshot" });
+    const otherTicket = await request(server.origin, `/api/projects/${other.id}/tickets`, "POST", { title: "Other board ticket" });
+    const path = `/api/projects/${project.id}/tickets/${ticket.id}`;
+    await browser("set", "viewport", "1440", "1000");
+    await browser("open", `${server.origin}/projects/${project.id}`);
+    await browser("wait", "--fn", "document.querySelector('.ticket-card')?.draggable === true");
+    await browser("eval", `window.originalMetadataFetch = window.fetch; window.releaseMetadataRequest = null;
+      window.fetch = (input, options) => typeof input === 'string' && input.startsWith('/api/projects?after=')
+        ? new Promise((resolve, reject) => { window.releaseMetadataRequest = () => window.originalMetadataFetch(input, options).then(resolve, reject); })
+        : window.originalMetadataFetch(input, options); true`);
+    await browser("wait", "--fn", "window.releaseMetadataRequest !== null");
+    await browser("eval", "document.addEventListener('dragstart', event => { window.safetyDragTrusted = event.isTrusted; }, true); document.addEventListener('drop', event => { window.safetyDropTrusted = event.isTrusted; }, true); true");
+    const source = await center(".ticket-card");
+    const target = await center('.column[aria-label="Building"]');
+    const dragThresholdPx = 20;
+    nativeDrag = await connectNativeDrag(server.origin, browser);
+    await Promise.all([
+      once(nativeDrag.events, "drag", { signal: AbortSignal.timeout(requestTimeoutMs) }),
+      (async () => {
+        await nativeDrag.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: source.x, y: source.y });
+        await nativeDrag.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", buttons: 1, clickCount: 1, x: source.x, y: source.y });
+        // Chromium needs both held-button fields to initiate a native HTML drag through CDP.
+        await nativeDrag.send("Input.dispatchMouseEvent", { type: "mouseMoved", button: "left", buttons: 1, x: source.x + dragThresholdPx, y: source.y });
+        await nativeDrag.send("Input.dispatchMouseEvent", { type: "mouseMoved", button: "left", buttons: 1, x: source.x + dragThresholdPx * 2, y: source.y });
+      })(),
+    ]);
+    await browser("wait", ".ticket-card.dragging");
+    assert.ok(Array.isArray(nativeDrag.data.items) && nativeDrag.data.items.length > 0, "Drag data must come from Chromium's native source");
+    assert.ok(nativeDrag.data.items.every((item) => item.data === String(ticket.id)), "Transferable drag data should contain only the ticket ID, not ticket text");
+    await nativeDrag.send("Input.dispatchDragEvent", { type: "dragEnter", x: target.x, y: target.y, data: nativeDrag.data });
+    await nativeDrag.send("Input.dispatchDragEvent", { type: "dragOver", x: target.x, y: target.y, data: nativeDrag.data });
+    await browser("wait", ".column.drop-target");
+    if (process.env.DOCKET_SCREENSHOTS) {
+      await mkdir(process.env.DOCKET_SCREENSHOTS, { recursive: true });
+      await browser("screenshot", join(process.env.DOCKET_SCREENSHOTS, "board-drag-active.png"));
+    }
+    await browser("eval", "window.fetch = window.originalMetadataFetch; window.releaseMetadataRequest(); true");
+    const authoritative = await request(server.origin, path, "PATCH", { status: "Review", title: "Changed while dragging" }, ticket.version);
+    // Holding across a poll interval proves the snapshot version is not silently rebased mid-gesture.
+    const liveCycleWaitMs = 3500;
+    await delay(liveCycleWaitMs);
+    assert.match(await browser("eval", `(() => {
+      if (!document.querySelector('.column[aria-label="Queue"] .ticket-card.dragging')) throw new Error('Live polling replaced the native drag source');
+      return 'PASS';
+    })()`), /PASS/);
+    await nativeDrag.send("Input.dispatchDragEvent", { type: "drop", x: target.x, y: target.y, data: nativeDrag.data });
+    await nativeDrag.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", buttons: 0, clickCount: 1, x: target.x, y: target.y });
+    await nativeDrag.send("Input.setInterceptDrags", { enabled: false });
+    nativeDrag.close();
+    nativeDrag = undefined;
+    await browser("wait", "--fn", "document.getElementById('notification').textContent.includes('Changed since') && document.querySelector('.column[aria-label=\"Review\"] .ticket-card') !== null && document.querySelector('.ticket-card')?.draggable === true");
+    assert.deepEqual(await request(server.origin, path), authoritative, "Stale drop must not overwrite a newer ticket");
+    assert.match(await browser("eval", "window.safetyDragTrusted === true && window.safetyDropTrusted === true"), /true/);
+    await browser("set", "offline", "on");
+    await browser("drag", ".ticket-card", '.column[aria-label="Building"]');
+    await browser("wait", "--fn", "document.getElementById('notification').textContent.includes('Reload to check') && !document.querySelector('.ticket-card').disabled");
+    assert.deepEqual(await request(server.origin, path), authoritative, "Offline dragging must not move the ticket client-side only");
+    assert.match(await browser("eval", `(() => {
+      if (!document.querySelector('.column[aria-label="Review"] .ticket-card')) throw new Error('Failed drop left the card in the wrong column');
+      if (document.querySelector('.dragging,.drop-target')) throw new Error('Failed drop left drag styling active');
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("set", "offline", "off");
+    await browser("drag", ".ticket-card", '.column[aria-label="Queue"]');
+    await browser("wait", "--fn", "document.querySelector('.column[aria-label=\"Queue\"] .ticket-card') !== null && document.querySelector('.ticket-card')?.draggable === true");
+    const recovered = await request(server.origin, path);
+    assert.equal(recovered.status, "Queue");
+    assert.equal(recovered.version, authoritative.version + 1);
+    await browser("eval", `window.originalMoveFetch = window.fetch; window.releaseMoveRequest = null;
+      window.fetch = (input, options) => input === ${JSON.stringify(path)} && options?.method === 'PATCH'
+        ? new Promise((resolve, reject) => { window.releaseMoveRequest = () => window.originalMoveFetch(input, options).then(resolve, reject); })
+        : window.originalMoveFetch(input, options); true`);
+    await browser("drag", ".ticket-card", '.column[aria-label="Building"]');
+    await browser("wait", "--fn", "window.releaseMoveRequest !== null");
+    await browser("click", ".project-link:nth-child(2)");
+    await browser("wait", "--fn", `location.pathname === '/projects/${other.id}'`);
+    await browser("eval", "window.fetch = window.originalMoveFetch; window.releaseMoveRequest(); true");
+    await browser("wait", "--fn", "document.querySelector('.ticket-card')?.draggable === true");
+    const completed = await request(server.origin, path);
+    assert.equal(completed.status, "Building");
+    assert.equal(completed.version, recovered.version + 1, "Move must commit exactly once after navigation");
+    assert.deepEqual(await request(server.origin, `/api/projects/${other.id}/tickets/${otherTicket.id}`), otherTicket);
+    assert.match(await browser("eval", `(() => {
+      if (location.pathname !== '/projects/${other.id}' || document.getElementById('project-name').textContent !== 'Other board') throw new Error('Move completion retargeted project navigation');
+      const cards = document.querySelectorAll('.ticket-card');
+      if (cards.length !== 1 || cards[0].dataset.ticketId !== '${otherTicket.id}') throw new Error('Old project ticket leaked into the new board');
+      return 'PASS';
+    })()`), /PASS/);
+  } finally {
+    nativeDrag?.close();
+    await browser("mouse", "up").catch(() => console.error("Disposable drag pointer cleanup unavailable"));
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});

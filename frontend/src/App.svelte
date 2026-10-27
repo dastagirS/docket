@@ -3,11 +3,12 @@
   import Icon from "./Icon.svelte";
   import ProjectDialog from "./ProjectDialog.svelte";
   import TicketDialog from "./TicketDialog.svelte";
-  import { api, errorMessage, PAGE_SIZE, TICKETS_VISIBLE_MAX, projectPath, readPage, readProject, readTicket, readEvent, type Project, type Ticket } from "./api";
+  import { api, ApiError, errorMessage, PAGE_SIZE, TICKETS_VISIBLE_MAX, projectPath, ticketPath, readPage, readProject, readTicket, readEvent, type Project, type Ticket } from "./api";
 
   const SEARCH_DELAY_MS = 300;
   const NOTIFICATION_DURATION_MS = 10000;
   const SYNC_INTERVAL_MS = 3000;
+  const DRAG_DATA_TYPE = "application/x-docket-ticket";
   let projects: Project[] = [];
   let project: Project | null = null;
   let tickets: Ticket[] = [];
@@ -16,6 +17,11 @@
   let cursor = 0;
   let more = false;
   let loadingMore = false;
+  let loadingProject = false;
+  let draggedTicket: Ticket | null = null;
+  let dragGeneration = 0;
+  let dropStatus: string | null = null;
+  let movingTicketID: number | null = null;
   let showArchived = false;
   let showArchivedTickets = false;
   let syncing = false;
@@ -41,6 +47,61 @@
   function run(action: () => Promise<unknown>): void {
     action().catch((error: unknown) => notify(errorMessage(error)));
   }
+  function finishTicketDrag(): void {
+    draggedTicket = null;
+    dropStatus = null;
+  }
+  function startTicketDrag(event: DragEvent, ticket: Ticket): void {
+    // An in-flight board read could replace the source node or its version during the native gesture.
+    if (!project || ticket.project_id !== project.id || ticket.archived || draggedTicket || movingTicketID !== null || loadingProject || loadingMore || !event.dataTransfer) {
+      event.preventDefault();
+      return;
+    }
+    try {
+      event.dataTransfer.effectAllowed = "move";
+      // Keep ticket text out of the transferable payload if the drag leaves this app.
+      event.dataTransfer.clearData();
+      event.dataTransfer.setData(DRAG_DATA_TYPE, String(ticket.id));
+      draggedTicket = { ...ticket };
+      dragGeneration = generation;
+    } catch {
+      event.preventDefault();
+      finishTicketDrag();
+      notify("Dragging is unavailable. Open the ticket and use its Status field instead.");
+    }
+  }
+  function dragOverStatus(event: DragEvent, status: string): void {
+    if (!project || !draggedTicket || movingTicketID !== null || draggedTicket.project_id !== project.id || dragGeneration !== generation || !project.statuses.includes(status)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = status === draggedTicket.status ? "none" : "move";
+    dropStatus = status === draggedTicket.status ? null : status;
+  }
+  async function dropTicket(event: DragEvent, status: string): Promise<void> {
+    event.preventDefault();
+    const selected = draggedTicket;
+    const currentGeneration = dragGeneration;
+    finishTicketDrag();
+    if (!project || !selected || selected.archived || movingTicketID !== null || selected.project_id !== project.id || currentGeneration !== generation || !project.statuses.includes(status) || event.dataTransfer?.getData(DRAG_DATA_TYPE) !== String(selected.id) || status === selected.status) return;
+    const reference = `${project.key}-${selected.id}`;
+    const visibleCount = tickets.length;
+    movingTicketID = selected.id;
+    let committed = false;
+    try {
+      const saved = await api(ticketPath(selected.project_id, selected.id), { method: "PATCH", headers: { "If-Match": `"${selected.version}"` }, body: JSON.stringify({ status }) }, readTicket);
+      if (saved.id !== selected.id || saved.project_id !== selected.project_id || saved.status !== status) throw new Error("Unexpected ticket response. Reload to check the result.");
+      committed = true;
+      if (currentGeneration === generation && project?.id === selected.project_id) tickets = tickets.map((ticket) => ticket.id === saved.id ? saved : ticket);
+      notify(`${reference} moved to ${status}.`);
+    } catch (failure) {
+      notify(errorMessage(failure) + (failure instanceof ApiError ? "" : " Reload to check the result before trying again."));
+    } finally {
+      if (currentGeneration === generation && project?.id === selected.project_id) {
+        try { await loadProject(selected.project_id, visibleCount); }
+        catch (failure) { notify((committed ? "Ticket moved, but board refresh failed. " : "Board refresh failed. ") + errorMessage(failure) + " Reload to check the result."); }
+      }
+      movingTicketID = null;
+    }
+  }
   async function loadProjects(): Promise<void> {
     const loaded: Project[] = [];
     let after = 0;
@@ -54,32 +115,36 @@
     projects = loaded;
   }
   async function loadProject(projectID: number, visibleCount = PAGE_SIZE): Promise<boolean> {
+    finishTicketDrag();
     const currentGeneration = ++generation;
-    const archiveFilter = showArchivedTickets;
-    // Capture the cursor before the snapshot so mutations racing its reads remain visible to the next poll.
-    const feed = await api(`${projectPath(projectID)}/events?tail=true&limit=1`, {}, readPage(readEvent));
-    if (currentGeneration !== generation) return false;
-    const [loaded, firstPage] = await Promise.all([
-      api(projectPath(projectID), {}, readProject),
-      api(`${projectPath(projectID)}/tickets?archived=${archiveFilter}&q=${encodeURIComponent(search)}`, {}, readPage(readTicket)),
-    ]);
-    let page = firstPage;
-    const loadedTickets = [...page.items];
-    const pageCount = Math.min(Math.max(1, Math.ceil(visibleCount / PAGE_SIZE)), TICKETS_VISIBLE_MAX / PAGE_SIZE);
-    for (let i = 1; i < pageCount && page.items.length === PAGE_SIZE; i++) {
+    loadingProject = true;
+    try {
+      const archiveFilter = showArchivedTickets;
+      // Capture the cursor before the snapshot so mutations racing its reads remain visible to the next poll.
+      const feed = await api(`${projectPath(projectID)}/events?tail=true&limit=1`, {}, readPage(readEvent));
       if (currentGeneration !== generation) return false;
-      page = await api(`${projectPath(projectID)}/tickets?after=${page.next_cursor}&archived=${archiveFilter}&q=${encodeURIComponent(search)}`, {}, readPage(readTicket));
-      loadedTickets.push(...page.items);
-    }
-    if (currentGeneration !== generation) return false;
-    if (!project || project.id !== loaded.id || project.archived !== loaded.archived) showArchived = loaded.archived;
-    project = loaded;
-    tickets = loadedTickets;
-    eventCursor = feed.next_cursor;
-    cursor = page.next_cursor;
-    more = page.items.length === PAGE_SIZE;
-    document.title = `${loaded.name} · Docket`;
-    return true;
+      const [loaded, firstPage] = await Promise.all([
+        api(projectPath(projectID), {}, readProject),
+        api(`${projectPath(projectID)}/tickets?archived=${archiveFilter}&q=${encodeURIComponent(search)}`, {}, readPage(readTicket)),
+      ]);
+      let page = firstPage;
+      const loadedTickets = [...page.items];
+      const pageCount = Math.min(Math.max(1, Math.ceil(visibleCount / PAGE_SIZE)), TICKETS_VISIBLE_MAX / PAGE_SIZE);
+      for (let i = 1; i < pageCount && page.items.length === PAGE_SIZE; i++) {
+        if (currentGeneration !== generation) return false;
+        page = await api(`${projectPath(projectID)}/tickets?after=${page.next_cursor}&archived=${archiveFilter}&q=${encodeURIComponent(search)}`, {}, readPage(readTicket));
+        loadedTickets.push(...page.items);
+      }
+      if (currentGeneration !== generation) return false;
+      if (!project || project.id !== loaded.id || project.archived !== loaded.archived) showArchived = loaded.archived;
+      project = loaded;
+      tickets = loadedTickets;
+      eventCursor = feed.next_cursor;
+      cursor = page.next_cursor;
+      more = page.items.length === PAGE_SIZE;
+      document.title = `${loaded.name} · Docket`;
+      return true;
+    } finally { if (currentGeneration === generation) loadingProject = false; }
   }
   async function navigate(projectID: number): Promise<void> {
     if (!ticketDialog.close()) return;
@@ -111,15 +176,15 @@
     if (currentGeneration === generation && project?.id === saved.id) await loadProject(saved.id, tickets.length);
   }
   async function syncLive(): Promise<void> {
-    if (syncing || document.hidden) return;
+    if (syncing || draggedTicket || movingTicketID !== null || document.hidden) return;
     syncing = true;
     const currentGeneration = generation;
     const selectedID = project?.id;
     try {
       await loadProjects();
-      if (!selectedID || currentGeneration !== generation) return;
+      if (!selectedID || currentGeneration !== generation || draggedTicket || movingTicketID !== null) return;
       const events = await api(`${projectPath(selectedID)}/events?after=${eventCursor}`, {}, readPage(readEvent));
-      if (currentGeneration !== generation) return;
+      if (currentGeneration !== generation || draggedTicket || movingTicketID !== null) return;
       if (events.items.length) await loadProject(selectedID, tickets.length);
       else eventCursor = events.next_cursor;
       if (project?.id === selectedID) await ticketDialog.sync(project);
@@ -200,20 +265,22 @@
     <div class="toolbar-right"><label class="search-label"><Icon name="search" /><input id="search" type="search" placeholder="Search tickets…" aria-label="Search tickets" maxlength="200" bind:value={search} oninput={searchChanged}></label><button id="refresh" class="quiet" aria-label="Refresh tickets" onclick={() => run(refresh)}><Icon name="refresh" /> Refresh</button></div>
   </div>
   <section id="welcome" class="welcome" hidden={!!project}><span class="welcome-mark">d</span><h2>Your work, in one place.</h2><p>A small board. A clear next step.<br>Create a project to start keeping track.</p><button id="welcome-new" class="primary" onclick={() => projectDialog.open(null)}><Icon name="plus" /> Create a project</button><span class="welcome-note">Simple by design. Yours to host.</span></section>
-  <section id="content" aria-label="Tickets" class={view} hidden={!project}>
+  <section id="content" aria-label="Tickets" class={view} aria-busy={loadingProject || movingTicketID !== null} hidden={!project}>
     {#if project}
       {#if view === "board"}
+        <p id="board-drag-help" class="sr-only">Drag a ticket to another status column, or open it and use the Status field. Archived tickets cannot be dragged.</p>
         {#each project.statuses as status, index (status)}
           {@const columnTickets = tickets.filter((ticket) => ticket.status === status)}
-          <section class="column" aria-label={status}>
+          <section class="column" class:drop-target={dropStatus === status} aria-label={status} ondragover={(event) => dragOverStatus(event, status)} ondragleave={(event) => { if (dropStatus === status && (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget))) dropStatus = null; }} ondrop={(event) => run(() => dropTicket(event, status))}>
             <div class="column-heading"><span class={`status-dot tone-${index % 5}`}></span><span>{status}</span><span class="count">{columnTickets.length}</span><button class="icon-button" aria-label={`New ticket in ${status}`} onclick={() => run(() => ticketDialog.open(project!, null, status))}><Icon name="plus" /></button></div>
             {#each columnTickets as ticket (ticket.id)}
-              <button class="ticket-card" aria-label={`${project.key}-${ticket.id}: ${ticket.title}`} aria-describedby={ticket.assignee ? `card-assignee-${ticket.id}` : undefined} onclick={() => run(() => ticketDialog.open(project!, ticket.id))}>
+              <button class="ticket-card" class:dragging={draggedTicket?.id === ticket.id} data-ticket-id={ticket.id} draggable={!ticket.archived && movingTicketID === null && !loadingProject && !loadingMore} disabled={movingTicketID === ticket.id} aria-label={`${project.key}-${ticket.id}: ${ticket.title}`} aria-describedby={ticket.assignee ? `board-drag-help card-assignee-${ticket.id}` : "board-drag-help"} ondragstart={(event) => startTicketDrag(event, ticket)} ondragend={finishTicketDrag} onclick={() => { if (!draggedTicket && movingTicketID !== ticket.id) run(() => ticketDialog.open(project!, ticket.id)); }}>
                 <div class="card-top"><span class="mono">{project.key}-{ticket.id}</span><Icon name="arrow-up-right" /></div>
                 <div class="card-title">{ticket.title}</div>
                 <div class="card-footer"><Icon name="clock" />{new Date(ticket.updated_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}{#if ticket.assignee}<span id={`card-assignee-${ticket.id}`} class="card-assignee" title={`Assigned to ${ticket.assignee}`}><Icon name="user" /><span>{ticket.assignee}</span></span>{/if}</div>
               </button>
-            {:else}<div class="column-empty">No tickets here</div>{/each}
+            {:else}<div class="column-empty">{dropStatus === status ? "Drop ticket here" : "No tickets here"}</div>{/each}
+            {#if dropStatus === status && columnTickets.length}<div class="column-drop-hint" aria-hidden="true">Drop ticket here</div>{/if}
           </section>
         {/each}
       {:else}
