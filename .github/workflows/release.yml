@@ -4,12 +4,18 @@ name: Release
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build and publish, e.g. v0.1.0'
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -22,22 +28,38 @@ jobs:
       commit: ${{ steps.source.outputs.commit }}
     steps:
       - name: Validate stable release tag
+        id: version
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         shell: bash
         run: |
+          case "$EVENT_NAME" in
+            workflow_dispatch) release_tag=$REQUESTED_TAG ;;
+            push)
+              if [[ "$REF_TYPE" != tag ]]; then
+                echo 'Release push must reference a tag.' >&2
+                exit 1
+              fi
+              release_tag=$REF_NAME ;;
+            *) echo 'Unsupported release event.' >&2; exit 1 ;;
+          esac
           tag_bytes_max=64
-          if [[ ${#RELEASE_TAG} -gt $tag_bytes_max || ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+          if [[ ${#release_tag} -gt $tag_bytes_max || ! "$release_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo 'Release tags must be stable vMAJOR.MINOR.PATCH versions.' >&2
             exit 1
           fi
+          printf 'tag=%s\n' "$release_tag" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: refs/tags/${{ steps.version.outputs.tag }}
           persist-credentials: false
       - name: Record checked-out source
         id: source
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
           printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           commit=$(git rev-parse HEAD)
@@ -56,7 +78,7 @@ jobs:
       - name: Real CLI and embedded-skill checks
         env:
           DOCKET_BINARY: ${{ runner.temp }}/docket-build/docket
-        run: node --test tests/cli.test.mjs tests/skill.test.mjs tests/install.test.mjs
+        run: node --test tests/cli.test.mjs tests/skill.test.mjs tests/install.test.mjs tests/workflow.test.mjs
       - name: Package release assets
         env:
           RELEASE_TAG: ${{ steps.source.outputs.tag }}

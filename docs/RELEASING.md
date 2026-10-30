@@ -36,16 +36,16 @@ Downloads are HTTPS-only (including redirects), use normal certificate verificat
 
 ## Publish a release
 
-The workflow runs only for `v*` tag pushes in `dastagirS/docket`, rejects non-stable tags, and does not create tags itself. Once reviewed changes are committed and pushed, an authorized maintainer can deliberately publish a new unused version:
+The workflow runs for `v*` tag pushes or manually through **Actions → Release → Run workflow** in `dastagirS/docket`. It requires an existing stable `vMAJOR.MINOR.PATCH` tag and never creates one. The manual form takes a required `tag`; it builds that exact tag, not the branch selected for the workflow. Once reviewed changes are committed and pushed, an authorized maintainer can deliberately publish a new unused version:
 
 ```sh
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-These are publishing instructions, not part of the installer or local test targets.
+Alternatively, once the tag exists on GitHub, use **Run workflow** and enter that tag. The workflow file must be present on the repository’s default branch for GitHub to show the manual button; keep the selected workflow branch at that default. Automatic/manual runs for the same tag share a concurrency group. These are publishing instructions, not part of the installer or local test targets.
 
-The read-only build job runs frontend type checks, Go race/vet tests, vulnerability scans, baseline QEMU/SQLite checks, and real CLI/skill/installer tests. Browser checks remain a separate local verification path because this workflow does not install a browser driver. Official Actions are pinned to full commit SHAs and checkout credentials are not persisted.
+The read-only build job runs frontend type checks, Go race/vet tests, vulnerability scans, baseline QEMU/SQLite checks, and real CLI/skill/installer tests and executable workflow-tag selection checks. Browser checks remain a separate local verification path because this workflow does not install a browser driver. Official Actions are pinned to full commit SHAs and checkout credentials are not persisted.
 
 Only the separate publish job receives `contents: write`. It downloads the build artifacts without checking out/executing repository scripts or binaries, confirms the tag still resolves to the built commit, checks hashes, creates a **draft** with all assets, and publishes only after upload succeeds. An existing release is never clobbered. A failed upload/publication can leave a draft or an already-published release: inspect the workflow and release state before rerunning; do not automatically delete/recreate it. GitHub manages the latest-release designation.
 
