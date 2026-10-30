@@ -1,6 +1,6 @@
 # Docket CLI
 
-The same native executable provides a short-lived API client and an explicit `serve` command. Client commands never open SQLite, migrate a database, or automatically start/stop a service. The browser UI and CLI share the existing HTTP API and history/version rules.
+The same native executable provides a short-lived API client and an explicit `serve` command. Client commands never open SQLite or automatically start/stop a service. The browser UI and CLI share the existing HTTP API and history/version rules.
 
 ## Build and install
 
@@ -15,7 +15,7 @@ docket --skill --references commands.md
 
 `PREFIX` changes the install prefix. `BUILD_DIRECTORY` changes the build output directory (default `bin`). Neither installation nor building restarts a systemd service. Installing a CLI in `~/.local/bin` does not replace a service executable configured at a different path.
 
-A bare `docket` prints help. To run the server, use `docket serve`; older invocations beginning with `--listen`, `--database`, `--public-url`, or `--backup-to` (including single-dash forms) remain supported. **No-argument server startup has intentionally changed to help.** Existing systemd/Docker commands supplying server flags remain compatible.
+A bare `docket` prints help. Start the server explicitly with `docket serve`; use `docket serve --help` for its options.
 
 ## Connection and output
 
@@ -28,7 +28,7 @@ docket project list
 docket ticket list --project 3 --json
 ```
 
-Without a binding, server precedence is command `--server`, then `DOCKET_URL`, then `http://127.0.0.1:7331`. Actor precedence: `--actor`, then `DOCKET_ACTOR`, then the API's default `Owner`. With no explicit `--project`, ticket/comment/event commands discover `.docket` and use its project **and** pinned server, ignoring `DOCKET_URL`. A different `--server` requires explicit `--project`; explicit `--project` bypasses folder defaults entirely (supply `--server` too when selecting a different instance). Project commands and `doctor` use the bound server unless `--server` is explicit. Environment values are not echoed in help.
+Without a binding, server precedence is command `--server`, then `DOCKET_URL`, then `http://127.0.0.1:7331`. Actor precedence: `--actor`, then `DOCKET_ACTOR`, then the API's default `Owner`. With no explicit `--project`, ticket/comment/event commands look up the current folder in `~/.docket/registry.json` and use its project **and** pinned server, ignoring `DOCKET_URL`. A different `--server` requires explicit `--project`; explicit `--project` bypasses folder defaults entirely (supply `--server` too when selecting a different instance). Project commands and `doctor` use the bound server unless `--server` is explicit. Environment values are not echoed in help.
 
 The server URL must be an HTTP(S) origin without credentials, query, fragment, or subpath, matching the service's configured public origin. `localhost` and `127.0.0.1` are not interchangeable under Host validation. HTTPS certificates are verified normally; no insecure-TLS option is provided.
 
@@ -40,22 +40,27 @@ Flags follow the command and its positional ID. Common flags are `--server`, `--
 
 ```sh
 cd /path/to/your/project
-docket project init  # terminal prompts for name/key, with folder-derived defaults
+docket project init
 docket ticket create --title 'First task'
-docket ticket list
 ```
 
-First init creates a new API project, then atomically writes an owner-only (mode 600) `.docket` JSON file in the current folder. It stores schema version 1, `project_url`, `project_key`, and `project_created_at`. No database or credentials are stored. An existing ancestor binding is reused instead of silently shadowed: discovery walks at most 64 ancestors, stopping at the nearest Git boundary. Subfolders inherit the binding, nested repositories do not. Normal Git worktrees need their own binding; the CLI does not edit shared Git metadata or Pi integration markers. Keep local marker/recovery files out of version control; this repository ignores them, but init does not edit other repositories' ignore files.
+The CLI keeps **one user-level `~/.docket` directory**, not a marker in every project:
 
-Re-running init reads the bound project and displays the total ticket count, including **archived tickets and subtickets**, with active/archived breakdown:
+```text
+~/.docket/
+  registry.json        # folder → server/project bindings (mode 600)
+  init.lock            # present only while init is running/incomplete
+```
 
-1. **Keep existing** (Enter/default): no mutation or marker rewrite.
-2. **Create another**: preserve the old project and bind to a new one.
-3. **Archive and replace**: archive the old project and bind to a new one. Tickets/history remain intact; nothing is permanently deleted.
+The directory is mode 700. Each version-1 registry entry stores `version`, canonical absolute `folder`, `project_url`, immutable `project_key`, and `project_created_at`; the registry has its own `version` and `bindings` array. It contains no credentials or database. Lookup walks at most 64 ancestors and stops at the nearest Git boundary. The nearest binding wins; nested repositories do not inherit an outer board. No global last-used project/server is inferred. Symlink folder aliases resolve to the canonical folder; moved/copied folders need deliberate registration. Invalid/deleted entries do not authorize another board; deleted paths may remain recorded without preventing other folders from working. Bindings are path-based: recreating a folder at a registered path reuses its board, so run init deliberately when repurposing a path.
 
-New projects need unique keys, including against archived projects. `--name` and `--key` set fields explicitly; otherwise they derive from the folder/name. Key generation keeps up to ten ASCII letters/digits, with a two-character minimum. Terminal prompts allow overriding defaults; each prompt is capped at 4 KiB and two minutes. EOF/invalid input cancels rather than accepting a destructive choice.
+First init creates the API project and atomically records the current folder. An existing ancestor binding is reused rather than silently shadowed. Re-init shows the project and total/active/archived ticket counts, including subtickets, then offers:
 
-Noninteractive re-init without a choice reports the existing project/count and exits 2 without changing anything. Agents must use an explicit approved choice, never a prompt-driving workaround:
+1. **Keep existing** (Enter/default): no remote mutation; an existing registry entry is not rewritten.
+2. **Create another**: preserve the old project and replace only this folder's association.
+3. **Archive and replace**: create a new project, archive the old one using its observed version, then replace this association. Tickets/history remain intact; keys stay reserved even after archival.
+
+Noninteractive repeats without an explicit choice exit 2 without mutation:
 
 ```sh
 docket project init --name 'Service' --key SERVICE --server http://127.0.0.1:7331
@@ -64,17 +69,17 @@ docket project init --on-existing create --name 'Next service' --key NEXT
 docket project init --on-existing archive --name 'Replacement' --key REPLACE
 ```
 
-`--interactive` explicitly enables prompts for controlled piped input. Init results are JSON (`action`, `project`, `marker`; keep also returns `tickets`). `project init --help` is offline and makes no files. The server must include the read-only `/stats` endpoint for repeat-init counts; existing API response shapes and the database schema are unchanged.
+Name/key default from the folder/name; keys need 2–10 ASCII letters/digits and must be unique. Prompts are bounded to 4 KiB/two minutes; `--interactive` permits controlled piped input. EOF/invalid input cancels. JSON output includes the registry filename as `marker` and the canonical `folder`; keep also returns `tickets`. Help is offline and creates no state. Ordinary lookup does not create the registry directory either.
 
-Implicit commands verify the stored project's immutable key/creation timestamp before ticket requests; changed/missing identities, malformed/oversized/nonprivate markers, symlinks, and pending init are errors, never reasons to guess another board. Implicit mutations refuse an archived project as a convenience guard; explicitly scoped API/CLI edits remain supported. A folder binding is **not authorization** and never bypasses the separate Pi integration's required tools or policies. Already-running commands snapshot their original binding; re-init does not retarget them.
+Implicit ticket requests verify the stored immutable project identity. Malformed/nonprivate/oversized metadata and symlinks are rejected. The registry is capped at 1 MiB/1,024 entries; scope is not broadened on errors. Implicit writes refuse archived projects as a convenience guard, while explicit authorized API/CLI edits remain available. Bindings are not authorization and never change Pi integration pins, ownership, assigned-ticket restrictions, or receipts.
 
 ### Interrupted init
 
-Local `.docket.lock` reserves initialization and records its phases. The replacement is created **before** old-project archival, so a duplicate key/capacity failure does not archive the old project first. Archival uses the version read before prompting, never a silently refreshed version. The marker changes only after confirmed creation/archival.
+`~/.docket/init.lock` serializes registry-changing init operations without retrying or stealing a lock. It records the canonical folder and operation phases. Existing unrelated registered folders remain usable; init for another folder must wait for explicit retry after the current operation finishes. Corrupt journals with unknown scope fail closed. One init cannot overwrite bindings committed by another, and detected external registry edits are retained rather than overwritten.
 
-These HTTP writes and the filesystem rename are **not one transaction**. A stale archive, lost response, interruption, or marker-write failure can leave a created replacement and a retained journal. Exit 6 requires reconciliation; the journal blocks init and implicit commands, and is never automatically expired, stolen, or replayed. A process killed before a write may also leave a lock without a commit.
+Creation, archival, and registry rename are **not one transaction**. The replacement is created before old-project archival so a duplicate-key failure leaves the old project intact. A stale/unknown write or filesystem failure may retain a created replacement and journal (exit 6). The affected folder's implicit commands stop until reconciliation; no replay, rollback, or automatic lock expiry occurs. Existing processes snapshot their original binding rather than being retargeted by a later init.
 
-Confirm no init is still running, inspect `.docket.lock` and the actual marker, then inspect the approved server's projects/history using explicit `--server` (and `--project` for ticket/event commands). Resolve the old/new projects and intended binding with human approval before removing the lock or leftover `.docket-write-*` files. To adopt a confirmed replacement manually, its marker must use the observed project URL, immutable key, and `created_at`, schema `version: 1`, and owner-only permissions. Do not remove a live lock or rerun creation just because no ID was returned. Partial journal writes/disk failures may require inspecting server history too; no power-cut guarantee is claimed.
+Confirm no init is running, inspect the home journal and registry, then inspect the approved server's projects/history with explicit `--server` (and `--project` for ticket/event commands). Resolve the intended association and old/new state with human approval before removing the journal/staged `.registry-write-*` files. An interruption after rename may already have updated the registry. Partial journal writes/disk failures may require server-history inspection; no power-loss/hostile-same-user guarantee is claimed.
 
 ## Bundled skill reference
 
@@ -87,7 +92,7 @@ These commands do not parse server configuration, contact HTTP, or open SQLite. 
 | Command | Purpose |
 | --- | --- |
 | `doctor` | Read `/healthz` and require status `ok` |
-| `project init` | Create a project and local binding; repeat with keep/create/archive choice |
+| `project init` | Create a project and home-registry folder binding; repeat with keep/create/archive choice |
 | `project list` | List projects, including archived projects |
 | `project create` | `--name`, `--key`, optional `--statuses` JSON string array |
 | `project get ID` | Read a project and version |
@@ -104,7 +109,7 @@ These commands do not parse server configuration, contact HTTP, or open SQLite. 
 | `events list --project ID` | Read one page of durable project events |
 | `serve` | Server/backup mode; see `docket serve --help` |
 
-Use the specific command's `--help` to discover flags. IDs are positive numeric IDs, not project keys or ticket references. Ticket/comment/event commands require either explicit `--project` or an initialized folder binding. Existing-record mutations still require explicit `--version`.
+Use the specific command's `--help` to discover flags. IDs are positive numeric IDs, not project keys or ticket references. Ticket/comment/event commands require either explicit `--project` or a folder binding in the home registry. Existing-record mutations still require explicit `--version`.
 
 All list/history commands accept `--after` and `--limit` (1–100). Each invocation retrieves one page, returning `next_cursor`; there is no hidden pagination, polling, acknowledgement, or cursor persistence. Ticket lists also accept `--q`, `--parent`, and `--archived` (archived-only instead of active-only). Keep the same filters when advancing a cursor.
 

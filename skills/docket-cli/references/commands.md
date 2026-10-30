@@ -16,13 +16,13 @@ Client commands accept `--server`, `--actor`, `--timeout`, and `--json`. Without
 
 ## Folder initialization (only when explicitly requested)
 
-`docket project init --server "$docket_url" --name "$approved_name" --key "$approved_unique_key"` creates a project and an owner-only `.docket` in the current folder. Descendants inherit it up to the nearest Git boundary (64 ancestors maximum). Existing ancestor bindings are reused, not silently shadowed. Keys remain reserved after archival.
+`docket project init --server "$docket_url" --name "$approved_name" --key "$approved_unique_key"` creates a project and records the canonical current folder in owner-only `~/.docket/registry.json` (private parent directory). No per-project metadata is created. Descendants inherit it up to the nearest Git boundary (64 ancestors maximum). Existing ancestor bindings are reused, not silently shadowed. Keys remain reserved after archival.
 
 Repeat init displays counts including archived tickets and subtickets. Terminals offer keep (default), create another (leave old intact), or archive old and replace. Noninteractive repeats require `--on-existing keep|create|archive`; new projects can use `--name`/`--key`. Do not use `--interactive` or pipe menu answers to avoid obtaining approval. Creation precedes archival; a failed/uncertain archive may leave a replacement and recovery journal. See safety before any recovery.
 
 Without `--project`, ticket/comment/event commands use the bound project **and** server; `DOCKET_URL` cannot retarget them. A differing `--server` requires explicit `--project`. Explicit `--project` bypasses the binding entirely and uses normal server flags/environment/defaults. `doctor` and project commands use the bound server unless `--server` is explicit. Unknown/changed identities or malformed markers fail rather than guessing another project. Implicit mutations refuse archived projects; explicit authorized edits remain supported.
 
-A binding is local convenience, not authorization. It never retargets Pi pins, claims tickets, or resolves integration receipts. Do not auto-initialize on a missing/denied board. Init and implicit commands refuse a pending `.docket.lock`; stop and involve the human rather than deleting it or retrying.
+A binding is local convenience, not authorization. It never retargets Pi pins, claims tickets, or resolves integration receipts. Do not auto-initialize on a missing/denied board. Init and implicit commands refuse a pending `~/.docket/init.lock` for the affected folder; stop and involve the human rather than deleting it or retrying.
 
 ## Projects
 

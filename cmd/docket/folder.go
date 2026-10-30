@@ -10,9 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
-	"unicode/utf8"
 
 	"docket/internal/docket"
 )
@@ -26,11 +24,13 @@ const initLockName = ".docket.lock"
 
 type folderBinding struct {
 	Version          int    `json:"version"`
+	Folder           string `json:"folder,omitempty"`
 	ProjectURL       string `json:"project_url"`
 	ProjectKey       string `json:"project_key"`
 	ProjectCreatedAt string `json:"project_created_at"`
 	path             string
 	original         []byte
+	legacyPath       string
 }
 
 func serverOrigin(value string) (string, error) {
@@ -62,66 +62,99 @@ func (binding folderBinding) reference() (string, int64, error) {
 	return origin, identifier, err
 }
 
-func readBinding(path string) (*folderBinding, error) {
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+func validateBinding(binding folderBinding) error {
+	if binding.Version != markerVersion || len(binding.ProjectKey) < projectKeyLengthMin || len(binding.ProjectKey) > projectKeyLengthMax {
+		return errors.New("Unsupported or invalid Docket project binding")
 	}
-	if err != nil {
-		return nil, errors.New("Cannot read .docket; markers must be regular files, not symlinks")
-	}
-	info, statError := file.Stat()
-	if statError != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
-		if err := file.Close(); err != nil {
-			return nil, errors.New("Cannot close invalid .docket marker")
+	for _, character := range binding.ProjectKey {
+		if !(character >= 'A' && character <= 'Z') && !(character >= '0' && character <= '9') {
+			return errors.New("Invalid bound project key")
 		}
-		return nil, errors.New(".docket must be a regular owner-only file (mode 600)")
 	}
-	payload, readError := io.ReadAll(io.LimitReader(file, markerBytesMax+1))
-	closeError := file.Close()
-	if readError != nil || closeError != nil || len(payload) > markerBytesMax || !utf8.Valid(payload) {
-		return nil, errors.New(".docket is unreadable, invalid UTF-8, or exceeds 8 KiB")
+	if _, err := time.Parse(time.RFC3339Nano, binding.ProjectCreatedAt); err != nil {
+		return errors.New("Invalid bound project identity timestamp")
+	}
+	_, _, err := binding.reference()
+	return err
+}
+
+func readBinding(path string) (*folderBinding, error) {
+	payload, err := readPrivateMetadata(path, markerBytesMax)
+	if err != nil || payload == nil {
+		return nil, err
 	}
 	var binding folderBinding
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&binding) != nil || decoder.Decode(new(any)) != io.EOF || binding.Version != markerVersion || binding.ProjectKey == "" || binding.ProjectCreatedAt == "" {
-		return nil, errors.New("Unsupported or invalid .docket marker; no project was guessed")
+	if decoder.Decode(&binding) != nil || decoder.Decode(new(any)) != io.EOF || binding.Folder != "" {
+		return nil, errors.New("Unsupported or invalid legacy .docket marker; no project was guessed")
 	}
-	if _, err := time.Parse(time.RFC3339Nano, binding.ProjectCreatedAt); err != nil {
-		return nil, errors.New("Invalid .docket project identity timestamp")
-	}
-	if _, _, err := binding.reference(); err != nil {
+	if err := validateBinding(binding); err != nil {
 		return nil, err
 	}
 	binding.path = path
 	binding.original = payload
+	binding.legacyPath = path
 	return &binding, nil
 }
 
-// Discovery stops at the nearest Git boundary so a nested repository cannot inherit another repo's board.
+// Registry entries and legacy markers obey the same Git boundary; nested repos never inherit a parent's board.
 func discoverBinding() (*folderBinding, string, error) {
+	registryPath, err := registryLocation(false)
+	if err != nil {
+		return nil, "", err
+	}
+	registry, err := readRegistry(registryPath)
+	if err != nil {
+		return nil, "", err
+	}
+	pending, err := pendingRegistryFolder(filepath.Dir(registryPath))
+	if err != nil {
+		return nil, "", err
+	}
+	registered := make(map[string]folderBinding, len(registry.Bindings))
+	for _, binding := range registry.Bindings {
+		registered[binding.Folder] = binding
+	}
 	directory, err := os.Getwd()
 	if err != nil {
 		return nil, "", errors.New("Cannot determine the current folder")
 	}
 	directory, err = filepath.EvalSymlinks(directory)
-	if err != nil {
-		return nil, "", errors.New("Cannot resolve the current folder")
+	if err != nil || !validRegistryFolder(directory) {
+		return nil, "", errors.New("Cannot resolve a valid current folder")
 	}
 	initial := directory
 	for i := 0; i < ancestorsMax; i++ {
+		if pending == directory {
+			return nil, "", errors.New("Folder initialization is running or incomplete; inspect ~/.docket/init.lock before using implicit scope")
+		}
 		if _, err := os.Lstat(filepath.Join(directory, initLockName)); err == nil {
-			return nil, "", errors.New("Folder initialization is running or incomplete; inspect .docket.lock before retrying or using implicit scope")
+			return nil, "", errors.New("Legacy initialization is incomplete; reconcile the local .docket.lock before migration")
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, "", errors.New("Cannot inspect folder initialization state")
+			return nil, "", errors.New("Cannot inspect legacy initialization state")
 		}
-		binding, err := readBinding(filepath.Join(directory, markerName))
-		if err != nil {
-			return nil, "", err
+		var legacy *folderBinding
+		if filepath.Join(directory, markerName) != filepath.Dir(registryPath) {
+			legacy, err = readBinding(filepath.Join(directory, markerName))
+			if err != nil {
+				return nil, "", err
+			}
 		}
-		if binding != nil {
-			return binding, directory, nil
+		binding, exists := registered[directory]
+		if exists {
+			if legacy != nil {
+				if !sameProjectBinding(binding, *legacy) {
+					return nil, "", errors.New("Home registry and legacy marker disagree; reconcile the folder binding explicitly")
+				}
+				binding.legacyPath = legacy.legacyPath
+				binding.original = legacy.original
+			}
+			return &binding, directory, nil
+		}
+		if legacy != nil {
+			legacy.Folder = directory
+			return legacy, directory, nil
 		}
 		if _, err := os.Lstat(filepath.Join(directory, ".git")); err == nil {
 			return nil, initial, nil

@@ -38,7 +38,7 @@ If this skill is already in context, do not repeatedly reload it. Read only the 
 ## Core workflow
 
 1. Discover syntax with `docket --help` and the specific command's `--help`. If the command is missing, report it; do not install software or change a service without permission.
-2. Establish the authorized scope. An authorized local `.docket` binding can supply the project/server. Prefer explicit `--server` and `--project` in agent workflows unless that binding has been approved. Never run init, replace a binding, or repair an unavailable board without explicit permission.
+2. Establish the authorized scope. An authorized folder binding in `~/.docket/registry.json` can supply the project/server. Prefer explicit `--server` and `--project` in agent workflows unless that binding has been approved. Never run init, replace a binding, or repair an unavailable board without explicit permission.
 3. Read the project/ticket. Use its actual configured statuses and the returned current version; do not guess IDs, status names, or versions.
 4. Make only the authorized change. Existing-record writes require explicit `--version`; omitted update flags leave their fields unchanged.
 5. Inspect the returned JSON and, where appropriate, read the resulting ticket/history. On any uncertain write, stop and reconcile rather than retrying.
@@ -68,8 +68,8 @@ Read the new version from every successful write before another mutation. Do not
 
 ## Rules that matter for agents
 
-- `project init` creates a project and local `.docket` binding; it is not an attach/claim/start action. Repeat choices are keep (default), create another, or archive-and-replace. Noninteractive repeats require `--on-existing keep|create|archive`; create/archive need explicit approval and a new unique key. See the command reference before initializing.
-- A `.docket.lock` means init is pending/incomplete: stop and reconcile with the human. Never delete it or repeat writes automatically. `.docket` does not modify Pi pins or ownership rules.
+- `project init` creates a project and records its folder in the home registry; it is not an attach/claim/start action. Repeat choices are keep (default), create another, or archive-and-replace. Noninteractive repeats require `--on-existing keep|create|archive`; create/archive need explicit approval and a new unique key. See the command reference before initializing.
+- A `~/.docket/init.lock` journal means init is pending/incomplete: stop and reconcile with the human. Never delete it or repeat writes automatically. The registry does not modify Pi pins or ownership rules.
 - Flags follow the command and its positional ID. IDs are numeric, not references such as `WEB-12`.
 - JSON is already the default; `--json` is optional. Check the exit status before parsing stdout. Never hide errors with `|| true` or parse a partial result after failure.
 - Use `--input FILE` or `--input -` for one UTF-8 JSON write object instead of complicated shell interpolation. Do not combine it with field flags. Keep `--version` outside the JSON body. Close stdin after sending the object.

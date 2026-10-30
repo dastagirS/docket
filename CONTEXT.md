@@ -24,7 +24,7 @@ A small, independent ticketing system for humans and API clients. External integ
 
 **CLI**: A short-lived HTTP client of Docket's existing service. It shares API validation and history, never opens the database for client commands, and does not implement integration ownership/delegation policies.
 
-**Folder binding**: An owner-only local `.docket` file created by `project init`, supplying the CLI's current project and server. It is a convenience, not authorization or a Pi ownership receipt.
+**Folder binding**: A canonical folder-to-project/server association in the private user registry at `~/.docket/registry.json`, created by `project init`. It is a convenience, not authorization or a Pi ownership receipt.
 
 **Integration**: An external client that uses Docket's API and events to add its own behavior.
 
@@ -37,7 +37,7 @@ A small, independent ticketing system for humans and API clients. External integ
 - A **Ticket** has a current **Status**, optional **Assignee**, **Comments**, and **History**.
 - Projects and tickets may be **Archived** independently. Archiving a project preserves its tickets and their individual archive states.
 - **Change events** let **Integrations** react without making the integration part of the ticketing system.
-- The CLI **Folder binding** is separate from the Pi **Integration**'s repository pin, parent-session ownership, agent delegation, and assigned-ticket-only access. Creating/replacing `.docket` never changes those integration policies or markers.
+- The CLI **Folder binding** is separate from the Pi **Integration**'s repository pin, parent-session ownership, agent delegation, and assigned-ticket-only access. Updating the home registry never changes those integration policies or markers.
 
 ## Example dialogue
 
@@ -56,4 +56,6 @@ A small, independent ticketing system for humans and API clients. External integ
 
 - A parent **Ticket** is a domain relationship, not the separate Pi integration's parent-session ownership. Reparenting existing tickets and deeper nesting are not supported.
 
-- CLI initialization resolved: first init creates a project and a local folder binding. Re-init displays counts including archived tickets and subtickets; the choices are keep (default), create another while preserving the old project, or archive old and replace. Archived keys remain reserved. Replacement is a journaled multi-step operation, not one cross-HTTP/filesystem transaction; incomplete work blocks implicit scope until explicitly reconciled.
+- CLI initialization resolved: first init creates a project and records a folder binding in the home registry. Re-init displays counts including archived tickets and subtickets; the choices are keep (default), create another while preserving the old project, or archive old and replace. Archived keys remain reserved. Replacement is a journaled multi-step operation, not one cross-HTTP/filesystem transaction; incomplete work blocks implicit scope until explicitly reconciled.
+
+- User-registry storage resolved: one private `~/.docket` directory per user, with a versioned `registry.json` and init recovery journal. Commands match the nearest canonical registered ancestor within the current Git boundary, never a global last-used board. Conflicting or pending registry state fails closed.

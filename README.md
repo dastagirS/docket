@@ -1,16 +1,26 @@
-<p><img src="frontend/public/favicon.svg" width="64" height="64" alt="Docket Queue logo"></p>
+<div align="center">
+
+<img src="frontend/public/favicon.svg" width="80" height="80" alt="Docket logo">
 
 # Docket
 
-**An issue tracker for agents.** A CLI for agents, a board for humans. One binary, local SQLite, no runtime Node dependency.
+**An issue tracker for agents.**
 
-- JSON output, embedded agent skills, and project context via `.docket`.
-- Version-safe updates, subtickets, comments, and durable history.
-- A live-updating web board for reviewing the same work.
+Structured for agents. Visible to humans. Yours to host.
+
+[Get started](#quickstart) · [CLI guide](docs/CLI.md) · [API](docs/API.md) · [Releases](docs/RELEASING.md)
+
+</div>
+
+---
+
+| Agent-ready | Human-friendly | Self-contained |
+| :--- | :--- | :--- |
+| JSON CLI, embedded skills, folder-to-board context | Live board, subtickets, comments, history | One executable, local SQLite, no runtime Node |
 
 ## Install
 
-Linux x86-64, curl 8.4+. Requires a published release; other platforms are not shipped yet.
+Download and run the checksum-verifying installer:
 
 ```sh
 installer=$(mktemp) &&
@@ -18,25 +28,29 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/dastagirS/docket/releas
 sh "$installer"
 ```
 
-Installs to `~/.local/bin` after SHA-256 verification. No sudo or service changes. [Inspect the installer](install.sh) or [build from source](docs/OPERATIONS.md).
+Installs to `~/.local/bin`. No sudo, profile edits, or service changes.
+
+*Requires a published release. [Build from source](docs/OPERATIONS.md), or see [platform support and pinned installs](docs/RELEASING.md).*
 
 ## Quickstart
 
+**1. Start Docket** — skip this if the service is already running.
+
 ```sh
-docket serve                       # skip if already running; http://127.0.0.1:7331
+docket serve                       # http://127.0.0.1:7331
 ```
 
-In another terminal, from your project folder:
+**2. Connect your project** — in another terminal, from its folder.
 
 ```sh
 docket project init
-docket --skill                     # give this guide to your agent
+docket --skill                     # give the built-in guide to your agent
 docket ticket create --title 'Add a health check'
 docket ticket list
 ```
 
-Docket tracks work; your integration controls agent execution and permissions.
+Folder bindings live together in `~/.docket/registry.json`. Your integration controls agent execution and permissions; Docket tracks the work.
 
-**No authentication: keep Docket on localhost or an independently restricted private network.**
+> **Keep it private.** Docket has no authentication. Use localhost or an independently restricted private network.
 
-[CLI](docs/CLI.md) · [API](docs/API.md) · [Build & operations](docs/OPERATIONS.md) · [Releases](docs/RELEASING.md) · [Security](docs/SECURITY.md)
+[Build & operations](docs/OPERATIONS.md) · [Security](docs/SECURITY.md)

@@ -32,6 +32,7 @@ type projectCounts struct {
 	Archived int64 `json:"archived"`
 }
 type initJournal struct {
+	Folder        string `json:"folder"`
 	Stage         string `json:"stage"`
 	PreviousURL   string `json:"previous_project_url,omitempty"`
 	CreatedURL    string `json:"created_project_url,omitempty"`
@@ -212,13 +213,14 @@ func initializeProject(arguments []string, input io.Reader, prompts io.Writer) (
 				return nil, errors.New("Unknown initialization choice; no changes made")
 			}
 		}
-		if choice == "keep" {
+		if choice == "keep" && binding.legacyPath == "" {
 			return json.Marshal(struct {
 				Action  string         `json:"action"`
 				Project docket.Project `json:"project"`
 				Marker  string         `json:"marker"`
 				Tickets projectCounts  `json:"tickets"`
-			}{"kept", previous, binding.path, counts})
+				Folder  string         `json:"folder"`
+			}{"kept", previous, binding.path, counts, root})
 		}
 	} else if choice == "keep" || choice == "archive" {
 		return nil, errors.New("No project is initialized in this folder; omit --on-existing to create one")
@@ -228,158 +230,223 @@ func initializeProject(arguments []string, input io.Reader, prompts io.Writer) (
 		return nil, err
 	}
 	command.server = origin
-	if name == "" {
-		name = filepath.Base(root)
-	}
-	if interactive && !seen["name"] {
-		answer, err := promptInit(reader, prompts, fmt.Sprintf("New project name [%q]: ", name))
-		if err != nil {
-			return nil, err
+	if choice != "keep" {
+		if name == "" {
+			name = filepath.Base(root)
 		}
-		if answer != "" {
-			name = answer
+		if interactive && !seen["name"] {
+			answer, err := promptInit(reader, prompts, fmt.Sprintf("New project name [%q]: ", name))
+			if err != nil {
+				return nil, err
+			}
+			if answer != "" {
+				name = answer
+			}
 		}
-	}
-	name = strings.TrimSpace(name)
-	if key == "" {
-		key = defaultProjectKey(name)
-	}
-	if interactive && !seen["key"] {
-		answer, err := promptInit(reader, prompts, fmt.Sprintf("New unique project key [%q]: ", key))
-		if err != nil {
-			return nil, err
+		name = strings.TrimSpace(name)
+		if key == "" {
+			key = defaultProjectKey(name)
 		}
-		if answer != "" {
-			key = answer
+		if interactive && !seen["key"] {
+			answer, err := promptInit(reader, prompts, fmt.Sprintf("New unique project key [%q]: ", key))
+			if err != nil {
+				return nil, err
+			}
+			if answer != "" {
+				key = answer
+			}
 		}
-	}
-	key = strings.ToUpper(strings.TrimSpace(key))
-	if !utf8.ValidString(name) || len(name) == 0 || len(name) > docket.NameBytesMax || strings.ContainsRune(name, 0) || len(key) < projectKeyLengthMin || len(key) > projectKeyLengthMax {
-		return nil, errors.New("Name must fit 100 UTF-8 bytes and key must have 2–10 ASCII letters/digits")
-	}
-	for _, character := range key {
-		if !(character >= 'A' && character <= 'Z') && !(character >= '0' && character <= '9') {
-			return nil, errors.New("Project key must contain only ASCII letters/digits")
+		key = strings.ToUpper(strings.TrimSpace(key))
+		if !utf8.ValidString(name) || len(name) == 0 || len(name) > docket.NameBytesMax || strings.ContainsRune(name, 0) || len(key) < projectKeyLengthMin || len(key) > projectKeyLengthMax {
+			return nil, errors.New("Name must fit 100 UTF-8 bytes and key must have 2–10 ASCII letters/digits")
 		}
+		for _, character := range key {
+			if !(character >= 'A' && character <= 'Z') && !(character >= '0' && character <= '9') {
+				return nil, errors.New("Project key must contain only ASCII letters/digits")
+			}
+		}
+	} else {
+		name = previous.Name
+		key = previous.Key
 	}
-	markerPath := filepath.Join(root, markerName)
-	lockPath := filepath.Join(root, initLockName)
+	markerPath, err := registryLocation(true)
+	if err != nil {
+		return nil, err
+	}
+	registryDirectory := filepath.Dir(markerPath)
+	lockPath := filepath.Join(registryDirectory, registryLockName)
 	lock, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
-		return nil, errors.New("Initialization lock already exists or folder is not writable; no project was created")
+		return nil, errors.New("Home registry initialization is running, incomplete, or not writable; inspect ~/.docket/init.lock; no project was created")
 	}
 	preserveLock := false
-	remoteChanged := false
+	stateChanged := false
 	defer func() {
 		if err := lock.Close(); err != nil {
 			result = errors.Join(result, errors.New("Cannot close initialization journal"))
 		}
 		if !preserveLock {
 			if err := os.Remove(lockPath); err != nil {
-				result = errors.Join(result, errors.New("Cannot remove initialization lock; inspect .docket.lock"))
+				result = errors.Join(result, errors.New("Cannot remove initialization lock; inspect ~/.docket/init.lock"))
 			}
 		}
-		if result != nil && (preserveLock || remoteChanged) {
+		if result != nil && (preserveLock || stateChanged) {
 			var failure *cliFailure
 			if !errors.As(result, &failure) || !failure.OutcomeUnknown {
-				result = &cliFailure{Exit: exitUncertain, Code: "init_incomplete", Message: "Initialization changed or may have changed server state; inspect .docket and .docket.lock before retrying", OutcomeUnknown: true}
+				result = &cliFailure{Exit: exitUncertain, Code: "init_incomplete", Message: "Initialization state changed or may have changed; inspect ~/.docket/registry.json and ~/.docket/init.lock before retrying", OutcomeUnknown: true}
 			}
 		}
 	}()
-	// Recheck after exclusive reservation: another init might have completed while the user answered.
-	current, err := readBinding(markerPath)
+	// Lock the single registry before re-reading it so independent folders cannot overwrite each other's entries.
+	registry, err := readRegistry(markerPath)
 	if err != nil {
 		return nil, err
 	}
-	if (binding == nil && current != nil) || (binding != nil && (current == nil || !bytes.Equal(binding.original, current.original))) {
-		return nil, errors.New("Folder binding changed during initialization; no project was created")
+	bindingIndex := -1
+	for i := range registry.Bindings {
+		if registry.Bindings[i].Folder == root {
+			bindingIndex = i
+			break
+		}
 	}
-	temporary, err := os.CreateTemp(root, ".docket-write-*")
+	if binding == nil && bindingIndex >= 0 {
+		return nil, errors.New("Folder was initialized while awaiting input; no project was created")
+	}
+	if binding != nil {
+		if bindingIndex >= 0 && !sameProjectBinding(registry.Bindings[bindingIndex], *binding) || bindingIndex < 0 && binding.legacyPath == "" {
+			return nil, errors.New("Registered folder changed during initialization; no project was created")
+		}
+	}
+	if filepath.Join(root, markerName) != registryDirectory {
+		current, err := readBinding(filepath.Join(root, markerName))
+		if err != nil {
+			return nil, err
+		}
+		if current != nil && (binding == nil || binding.legacyPath == "" || !bytes.Equal(current.original, binding.original)) || current == nil && binding != nil && binding.legacyPath != "" {
+			return nil, errors.New("Legacy marker changed during initialization; no project was created")
+		}
+	}
+	if bindingIndex < 0 && len(registry.Bindings) >= registryBindingsMax {
+		return nil, errors.New("Home registry is full; no project was created")
+	}
+	temporary, err := os.CreateTemp(registryDirectory, ".registry-write-*")
 	if err != nil {
-		return nil, errors.New("Cannot stage a folder marker; no project was created")
+		return nil, errors.New("Cannot stage home registry; no project was created")
 	}
 	temporaryPath := temporary.Name()
 	defer func() {
 		if err := os.Remove(temporaryPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			result = errors.Join(result, errors.New("Cannot remove staged marker"))
+			result = errors.Join(result, errors.New("Cannot remove staged registry"))
 		}
 	}()
 	if err := temporary.Close(); err != nil {
-		return nil, errors.New("Cannot close staged marker; no project was created")
+		return nil, errors.New("Cannot close staged registry; no project was created")
 	}
-	journal := initJournal{Stage: "creating", RequestedName: name, RequestedKey: key}
+	journal := initJournal{Folder: root, Stage: "creating", RequestedName: name, RequestedKey: key}
+	if choice == "keep" {
+		journal.Stage = "migrating"
+	}
 	if binding != nil {
 		journal.PreviousURL = binding.ProjectURL
 	}
 	if err := saveInitJournal(lock, journal); err != nil {
 		return nil, err
 	}
-	if err := syncFolder(root); err != nil {
+	if err := syncFolder(registryDirectory); err != nil {
 		return nil, errors.New("Cannot persist initialization reservation; no project was created")
 	}
-	command.method = http.MethodPost
-	command.path = "/api/projects"
-	command.body, err = json.Marshal(map[string]string{"name": name, "key": key})
-	if err != nil {
-		return nil, errors.New("Cannot encode new project")
-	}
-	data, err := command.requestOnce()
-	if err != nil {
-		var failure *cliFailure
-		if errors.As(err, &failure) && failure.OutcomeUnknown {
-			preserveLock = true
+	created := previous
+	action := "kept"
+	if choice != "keep" {
+		command.method = http.MethodPost
+		command.path = "/api/projects"
+		command.body, err = json.Marshal(map[string]string{"name": name, "key": key})
+		if err != nil {
+			return nil, errors.New("Cannot encode new project")
 		}
-		return nil, err
-	}
-	preserveLock = true
-	remoteChanged = true
-	var created docket.Project
-	if json.Unmarshal(data, &created) != nil || created.ID <= 0 || created.Version <= 0 || created.Key != key || created.Name != name || created.CreatedAt == "" || created.Archived {
-		return nil, &cliFailure{Exit: exitUncertain, Code: "init_incomplete", Message: "Project creation response was unexpected; inspect .docket.lock before retrying", OutcomeUnknown: true}
-	}
-	if _, err := time.Parse(time.RFC3339Nano, created.CreatedAt); err != nil {
-		return nil, &cliFailure{Exit: exitUncertain, Code: "init_incomplete", Message: "Unexpected project identity timestamp; inspect .docket.lock before retrying", OutcomeUnknown: true}
-	}
-	journal.Stage = "created"
-	journal.CreatedURL = origin + "/projects/" + strconv.FormatInt(created.ID, 10)
-	if err := saveInitJournal(lock, journal); err != nil {
-		return nil, err
-	}
-	action := "created"
-	if binding != nil {
-		action = "created_another"
-	}
-	if binding != nil && choice == "archive" {
-		action = "archived_and_replaced"
-		journal.Stage = "archiving_previous"
+		data, err := command.requestOnce()
+		if err != nil {
+			var failure *cliFailure
+			if errors.As(err, &failure) && failure.OutcomeUnknown {
+				preserveLock = true
+			}
+			return nil, err
+		}
+		preserveLock = true
+		stateChanged = true
+		if json.Unmarshal(data, &created) != nil || created.ID <= 0 || created.Version <= 0 || created.Key != key || created.Name != name || created.CreatedAt == "" || created.Archived {
+			return nil, &cliFailure{Exit: exitUncertain, Code: "init_incomplete", Message: "Project creation response was unexpected; inspect ~/.docket/init.lock before retrying", OutcomeUnknown: true}
+		}
+		if _, err := time.Parse(time.RFC3339Nano, created.CreatedAt); err != nil {
+			return nil, &cliFailure{Exit: exitUncertain, Code: "init_incomplete", Message: "Unexpected project identity timestamp; inspect ~/.docket/init.lock before retrying", OutcomeUnknown: true}
+		}
+		journal.Stage = "created"
+		journal.CreatedURL = origin + "/projects/" + strconv.FormatInt(created.ID, 10)
 		if err := saveInitJournal(lock, journal); err != nil {
 			return nil, err
 		}
-		archive := apiCommand{server: origin, method: http.MethodPatch, path: "/api/projects/" + strconv.FormatInt(previous.ID, 10), body: []byte(`{"archived":true}`), version: previous.Version, actor: command.actor, timeout: command.timeout}
-		data, err := archive.requestOnce()
-		var archived docket.Project
-		if err != nil || json.Unmarshal(data, &archived) != nil || archived.ID != previous.ID || !archived.Archived || archived.Version <= previous.Version || archived.Key != previous.Key || archived.CreatedAt != previous.CreatedAt {
-			return nil, &cliFailure{Exit: exitUncertain, Code: "init_incomplete", Message: "Replacement was created, but old-project archival could not be confirmed. Original marker retained; inspect .docket.lock and project history before retrying", OutcomeUnknown: true}
+		action = "created"
+		if binding != nil {
+			action = "created_another"
 		}
+		if binding != nil && choice == "archive" {
+			action = "archived_and_replaced"
+			journal.Stage = "archiving_previous"
+			if err := saveInitJournal(lock, journal); err != nil {
+				return nil, err
+			}
+			archive := apiCommand{server: origin, method: http.MethodPatch, path: "/api/projects/" + strconv.FormatInt(previous.ID, 10), body: []byte(`{"archived":true}`), version: previous.Version, actor: command.actor, timeout: command.timeout}
+			data, err := archive.requestOnce()
+			var archived docket.Project
+			if err != nil || json.Unmarshal(data, &archived) != nil || archived.ID != previous.ID || !archived.Archived || archived.Version <= previous.Version || archived.Key != previous.Key || archived.CreatedAt != previous.CreatedAt {
+				return nil, &cliFailure{Exit: exitUncertain, Code: "init_incomplete", Message: "Replacement was created, but old-project archival could not be confirmed. Original binding retained; inspect ~/.docket/init.lock and project history before retrying", OutcomeUnknown: true}
+			}
+		}
+	} else {
+		journal.CreatedURL = binding.ProjectURL
 	}
+	preserveLock = true
+
 	journal.Stage = "binding"
 	if err := saveInitJournal(lock, journal); err != nil {
 		return nil, err
 	}
-	selected := folderBinding{Version: markerVersion, ProjectURL: journal.CreatedURL, ProjectKey: created.Key, ProjectCreatedAt: created.CreatedAt}
-	encoded, err := json.MarshalIndent(selected, "", "  ")
+	selected := folderBinding{Folder: root, Version: markerVersion, ProjectURL: journal.CreatedURL, ProjectKey: created.Key, ProjectCreatedAt: created.CreatedAt}
+	if bindingIndex >= 0 {
+		registry.Bindings[bindingIndex] = selected
+	} else {
+		registry.Bindings = append(registry.Bindings, selected)
+	}
+	encoded, err := json.MarshalIndent(registry, "", "  ")
 	if err != nil {
 		return nil, err
 	}
-	if err := writeFolderMarker(temporaryPath, markerPath, append(encoded, '\n')); err != nil {
-		return nil, &cliFailure{Exit: exitUncertain, Code: "init_incomplete", Message: "Project was created but folder binding could not be confirmed; inspect .docket.lock before retrying", OutcomeUnknown: true}
+	currentRegistry, err := readPrivateMetadata(markerPath, registryBytesMax)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(registry.original, currentRegistry) {
+		return nil, errors.New("Home registry changed outside initialization; external edits retained; inspect ~/.docket/init.lock")
+	}
+	if err := writeRegistryFile(temporaryPath, markerPath, append(encoded, '\n')); err != nil {
+		return nil, &cliFailure{Exit: exitUncertain, Code: "init_incomplete", Message: "Home registry binding could not be confirmed; inspect ~/.docket/init.lock before retrying", OutcomeUnknown: true}
+	}
+	stateChanged = true
+	if err := removeLegacyBinding(binding); err != nil {
+		return nil, err
 	}
 	preserveLock = false
+	var resultCounts *projectCounts
+	if choice == "keep" {
+		resultCounts = &counts
+	}
 	return json.Marshal(struct {
 		Action  string         `json:"action"`
 		Project docket.Project `json:"project"`
 		Marker  string         `json:"marker"`
-	}{action, created, markerPath})
+		Folder  string         `json:"folder"`
+		Tickets *projectCounts `json:"tickets,omitempty"`
+	}{action, created, markerPath, root, resultCounts})
 }
 
 func saveInitJournal(file *os.File, journal initJournal) error {
@@ -387,8 +454,11 @@ func saveInitJournal(file *os.File, journal initJournal) error {
 	if err != nil {
 		return err
 	}
+	if len(payload) > journalBytesMax {
+		return errors.New("Initialization journal exceeds size limit")
+	}
 	if err := file.Truncate(0); err != nil {
-		return &cliFailure{Exit: exitUncertain, Code: "init_incomplete", Message: "Cannot update initialization journal; inspect .docket.lock", OutcomeUnknown: true}
+		return &cliFailure{Exit: exitUncertain, Code: "init_incomplete", Message: "Cannot update initialization journal; inspect ~/.docket/init.lock", OutcomeUnknown: true}
 	}
 	if _, err := file.Seek(0, 0); err != nil {
 		return err
@@ -399,9 +469,9 @@ func saveInitJournal(file *os.File, journal initJournal) error {
 	return file.Sync()
 }
 
-func writeFolderMarker(temporaryPath, markerPath string, payload []byte) error {
-	if len(payload) > markerBytesMax {
-		return errors.New("Folder marker exceeds size limit")
+func writeRegistryFile(temporaryPath, markerPath string, payload []byte) error {
+	if len(payload) > registryBytesMax {
+		return errors.New("Home registry exceeds size limit")
 	}
 	file, err := os.OpenFile(temporaryPath, os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
@@ -411,7 +481,7 @@ func writeFolderMarker(temporaryPath, markerPath string, payload []byte) error {
 	syncError := file.Sync()
 	closeError := file.Close()
 	if writeError != nil || syncError != nil || closeError != nil {
-		return errors.New("Cannot persist staged folder marker")
+		return errors.New("Cannot persist staged home registry")
 	}
 	if err := os.Rename(temporaryPath, markerPath); err != nil {
 		return err

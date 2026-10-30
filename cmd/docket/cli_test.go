@@ -20,6 +20,7 @@ import (
 )
 
 func TestCLIParsePreservesPatchFieldsAndScope(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("DOCKET_URL", "http://127.0.0.1:9999")
 	command, help, err := parseCommand([]string{"ticket", "update", "42", "--project", "3", "--version", "7", "--assignee", ""}, strings.NewReader(""))
 	if err != nil || help != "" {
@@ -38,6 +39,7 @@ func TestCLIParsePreservesPatchFieldsAndScope(t *testing.T) {
 }
 
 func TestCLIRejectsInvalidInputsWithoutDatabase(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 	t.Setenv("DOCKET_URL", "http://127.0.0.1:0")
 	t.Setenv("DOCKET_ACTOR", "")
@@ -76,6 +78,7 @@ func TestCLIRejectsInvalidInputsWithoutDatabase(t *testing.T) {
 }
 
 func TestCLIJSONInputBoundsAndUTF8(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	arguments := []string{"ticket", "create", "--project", "1", "--input", "-"}
 	for _, body := range []string{"null", "[]", `{}`, `{"title":"x"} {}`, string([]byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'}), strings.Repeat(" ", requestBytesMax+1)} {
 		if _, _, err := parseCommand(arguments, strings.NewReader(body)); err == nil {
@@ -99,6 +102,7 @@ func TestCLIJSONInputBoundsAndUTF8(t *testing.T) {
 }
 
 func TestCLIRequestsUseRealApplication(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 	store, err := docket.Open(filepath.Join(t.TempDir(), "cli.sqlite"))
 	if err != nil {
@@ -165,6 +169,7 @@ type brokenWriter struct{}
 func (brokenWriter) Write([]byte) (int, error) { return 0, errors.New("test output unavailable") }
 
 func TestCLITransportErrorsAreBoundedAndNeverRetried(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("DOCKET_ACTOR", "")
 	for _, scenario := range []struct {
 		name, payload    string
@@ -225,6 +230,7 @@ func TestCLITransportErrorsAreBoundedAndNeverRetried(t *testing.T) {
 }
 
 func TestCLIBrokenOutputDoesNotReportSuccess(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	var diagnostics bytes.Buffer
 	if execute([]string{"--help"}, strings.NewReader(""), brokenWriter{}, &diagnostics) != exitFailure {
 		t.Fatal("Broken stdout reported success")
@@ -235,6 +241,7 @@ func TestCLIBrokenOutputDoesNotReportSuccess(t *testing.T) {
 }
 
 func TestLegacyAndExplicitBackupModesRemainCompatible(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	for _, explicit := range []bool{false, true} {
 		directory := t.TempDir()
 		arguments := []string{"--database", filepath.Join(directory, "db.sqlite"), "--backup-to", filepath.Join(directory, "backup.sqlite")}
@@ -252,6 +259,7 @@ func TestLegacyAndExplicitBackupModesRemainCompatible(t *testing.T) {
 }
 
 func TestCLIInputRejectsFIFOWithoutBlocking(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	path := filepath.Join(t.TempDir(), "input.pipe")
 	if err := syscall.Mkfifo(path, 0600); err != nil {
 		t.Fatal(err)
@@ -262,6 +270,7 @@ func TestCLIInputRejectsFIFOWithoutBlocking(t *testing.T) {
 }
 
 func TestCLIResponseSizeAndHealthValidation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/healthz" {
 			if _, err := io.WriteString(writer, `{"status":"not-docket"}`); err != nil {

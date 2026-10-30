@@ -2,7 +2,7 @@
 
 ## Keep the two Docket interfaces separate
 
-The standalone CLI is an ordinary client of the unauthenticated HTTP API. It has no authenticated identity, integration-enforced repository pin, ownership receipt, assigned-ticket sandbox, claim, handoff, or delegation mechanism. The CLI's local `.docket` binding is a separate convenience, not an integration pin or ownership receipt. Numeric project IDs and `--actor` labels are not access controls.
+The standalone CLI is an ordinary client of the unauthenticated HTTP API. It has no authenticated identity, integration-enforced repository pin, ownership receipt, assigned-ticket sandbox, claim, handoff, or delegation mechanism. The CLI's folder binding in `~/.docket/registry.json` is a separate convenience, not an integration pin or ownership receipt. Numeric project IDs and `--actor` labels are not access controls.
 
 The separate Pi `docket`/worker tools can impose stricter workflow rules. When those tools are required by the session/repository:
 
@@ -59,6 +59,6 @@ Archiving is reversible and organizational, not read-only or authorization. It d
 
 ## Initialization recovery
 
-`project init` creation, old-project archival, and local binding are separate steps, not a single transaction. The replacement is created first; the old project's version is never silently refreshed. `.docket.lock` serializes init and records `creating`, `created`, `archiving_previous`, or `binding`. A partial/unknown outcome retains it and blocks implicit scope; no automatic replay or lock stealing occurs.
+`project init` creation, old-project archival, and local binding are separate steps, not a single transaction. The replacement is created first; the old project's version is never silently refreshed. `~/.docket/init.lock` serializes registry changes and records the affected folder plus `creating`, `created`, `archiving_previous`, or `binding`. A partial/unknown outcome retains it and blocks implicit scope; no automatic replay or lock stealing occurs.
 
-A retained journal may identify a created replacement while the original marker still points to the old project. A rename followed by a disk-sync failure may already have changed the marker. Never assume either record is unchanged from the exit code alone. Confirm no init is running, obtain human recovery approval, and inspect journal, marker, and the approved server's projects/history with explicitly scoped authorized reads. Only after reconciling the intended old/new state and binding should the human remove the journal/staging files. If required Pi tools govern access, those rules still apply; this is not a workaround for their receipts.
+A retained journal may identify a created replacement while the registry still points to the old project. A rename followed by a disk-sync failure may already have changed the registry. Never assume either record is unchanged from the exit code alone. Confirm no init is running, obtain human recovery approval, and inspect the journal, registry, and the approved server's projects/history with explicitly scoped authorized reads. Only after reconciling the intended old/new state and binding should the human remove the journal/staging files. If required Pi tools govern access, those rules still apply; this is not a workaround for their receipts.

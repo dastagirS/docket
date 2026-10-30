@@ -13,6 +13,7 @@ import (
 )
 
 func TestCLIInitNonTerminalCharacterInputRequiresExplicitChoice(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 	store, err := docket.Open(filepath.Join(t.TempDir(), "init.sqlite"))
 	if err != nil {
@@ -55,6 +56,7 @@ func TestCLIInitNonTerminalCharacterInputRequiresExplicitChoice(t *testing.T) {
 }
 
 func TestCLIInitHelpIsOfflineAndReportsOutputFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 	t.Setenv("DOCKET_URL", "not a URL")
 	var diagnostics bytes.Buffer
@@ -70,6 +72,7 @@ func TestCLIInitHelpIsOfflineAndReportsOutputFailure(t *testing.T) {
 }
 
 func TestCLIFolderMarkerRejectsInvalidMetadata(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	path := filepath.Join(t.TempDir(), markerName)
 	for _, payload := range []string{
 		`null`, `[]`, `{}`, `{"version":2,"project_url":"http://127.0.0.1:0/projects/1","project_key":"TEST","project_created_at":"2026-01-01T00:00:00Z"}`,

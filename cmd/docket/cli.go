@@ -39,7 +39,7 @@ Flags follow the command and its positional ID. Use COMMAND --help for flags.
 Writes to existing records require --version from a previous read.
 Use --input FILE (or - for stdin) for JSON write bodies instead of field flags.
 No service is auto-started and writes are never automatically retried.
-Initialize this folder with docket project init; .docket supplies scoped commands' project/server.
+Initialize with docket project init; ~/.docket/registry.json maps folders to project/server.
 Explicit --project bypasses folder defaults. Otherwise a bound server stays pinned.
 Unbound server: --server, then DOCKET_URL, then http://127.0.0.1:7331.
 Legacy server flags (--listen, --database, --public-url, --backup-to) still work.
@@ -96,7 +96,7 @@ func execute(arguments []string, input io.Reader, output, diagnostics io.Writer)
 			if !json.Valid(payload) {
 				return emitFailure(diagnostics, &cliFailure{Exit: exitFailure, Code: "output_error", Message: "Cannot write initialization help"})
 			}
-			return emitFailure(diagnostics, &cliFailure{Exit: exitUncertain, Code: "outcome_unknown", Message: "Initialization result could not reach stdout; inspect .docket and .docket.lock before retrying", OutcomeUnknown: true})
+			return emitFailure(diagnostics, &cliFailure{Exit: exitUncertain, Code: "outcome_unknown", Message: "Initialization result could not reach stdout; inspect ~/.docket/registry.json and ~/.docket/init.lock before retrying", OutcomeUnknown: true})
 		}
 		return 0
 	}
@@ -214,7 +214,7 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 	var archived bool
 	fields := map[string]*string{}
 	if noun == "ticket" || noun == "comment" || noun == "events" {
-		flags.Int64Var(&projectID, "project", 0, "Project ID; otherwise use this folder's .docket binding")
+		flags.Int64Var(&projectID, "project", 0, "Project ID; otherwise look up this folder in ~/.docket/registry.json")
 	}
 	if write && action != "create" {
 		flags.Int64Var(&version, "version", 0, "Required current record version; never refreshed automatically")

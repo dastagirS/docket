@@ -1,8 +1,9 @@
 import test from "node:test";
+import { AsyncLocalStorage } from "node:async_hooks";
 import assert from "node:assert/strict";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, rm, writeFile, stat, mkdir, readFile, chmod, symlink } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, stat, mkdir, readFile, chmod, symlink, realpath, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -13,10 +14,19 @@ const execute = promisify(execFile);
 const binary = resolve(process.env.DOCKET_BINARY ?? "bin/docket");
 const commandTimeoutMs = 15000;
 const outputBytesMax = 1048576;
+const homeContext = new AsyncLocalStorage();
+function isolatedTest(name, options, callback) {
+  return test(name, options, async (context) => {
+    const home = await mkdtemp(join(tmpdir(), "docket-cli-home-"));
+    try { await homeContext.run(home, () => callback(context, home)); }
+    finally { await rm(home, { recursive: true, force: true }); }
+  });
+}
+
 async function cli(arguments_, options = {}) {
   const { stdin, keepStdinOpen = false, ...executionOptions } = options;
   try {
-    const pending = execute(binary, arguments_, { timeout: commandTimeoutMs, maxBuffer: outputBytesMax, env: { ...process.env, DOCKET_URL: "http://127.0.0.1:0", DOCKET_ACTOR: "" }, ...executionOptions });
+    const pending = execute(binary, arguments_, { timeout: commandTimeoutMs, maxBuffer: outputBytesMax, env: { ...process.env, HOME: homeContext.getStore(), DOCKET_URL: "http://127.0.0.1:0", DOCKET_ACTOR: "" }, ...executionOptions });
     if (!keepStdinOpen) pending.child.stdin.end(stdin);
     const result = await pending;
     return { ...result, code: 0 };
@@ -48,7 +58,7 @@ async function stopServer(child) {
   try { await exited; } catch (failure) { child.kill("SIGKILL"); throw failure; }
 }
 
-test("CLI real service: doctor, project/ticket commands, subtickets, versions, archives, comments, and events", { timeout: 60000 }, async () => {
+isolatedTest("CLI real service: doctor, project/ticket commands, subtickets, versions, archives, comments, and events", { timeout: 60000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "docket-cli-"));
   const server = await startServer(directory);
   const command = async (arguments_, expected = 0) => {
@@ -108,7 +118,7 @@ test("CLI real service: doctor, project/ticket commands, subtickets, versions, a
   }
 });
 
-test("CLI help and invalid/unavailable requests never create a local database", { timeout: 30000 }, async () => {
+isolatedTest("CLI help and invalid/unavailable requests never create a local database", { timeout: 30000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "docket-cli-no-database-"));
   try {
     for (const arguments_ of [[], ["--help"], ["ticket", "update", "--help"]]) {
@@ -143,16 +153,16 @@ test("CLI help and invalid/unavailable requests never create a local database", 
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("CLI explicit serve, environment configuration, and legacy backup operate only on disposable files", { timeout: 30000 }, async () => {
+isolatedTest("CLI explicit serve, environment configuration, and legacy backup operate only on disposable files", { timeout: 30000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "docket-cli-serve-"));
   const server = await startServer(directory, true);
   try {
-    const result = await cli(["doctor"], { env: { ...process.env, DOCKET_URL: server.origin, DOCKET_ACTOR: "Test actor" } });
+    const result = await cli(["doctor"], { env: { ...process.env, HOME: homeContext.getStore(), DOCKET_URL: server.origin, DOCKET_ACTOR: "Test actor" } });
     assert.equal(result.code, 0, result.stderr);
     assert.equal(JSON.parse(result.stdout).status, "ok");
-    const override = await cli(["doctor", "--server", "http://127.0.0.1:0"], { env: { ...process.env, DOCKET_URL: server.origin } });
+    const override = await cli(["doctor", "--server", "http://127.0.0.1:0"], { env: { ...process.env, HOME: homeContext.getStore(), DOCKET_URL: server.origin } });
     assert.equal(override.code, 5, "Explicit server must take precedence over environment");
-    const help = await cli(["doctor", "--help"], { env: { ...process.env, DOCKET_URL: "http://user:private-password@localhost", DOCKET_ACTOR: "private-label" } });
+    const help = await cli(["doctor", "--help"], { env: { ...process.env, HOME: homeContext.getStore(), DOCKET_URL: "http://user:private-password@localhost", DOCKET_ACTOR: "private-label" } });
     assert.equal(help.code, 0);
     assert.doesNotMatch(help.stdout + help.stderr, /private-password|private-label/);
     const backup = join(directory, "backup.sqlite");
@@ -164,7 +174,7 @@ test("CLI explicit serve, environment configuration, and legacy backup operate o
   }
 });
 
-test("CLI lost write response: real commit is not retried and is reported as uncertain", { timeout: 30000 }, async () => {
+isolatedTest("CLI lost write response: real commit is not retried and is reported as uncertain", { timeout: 30000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "docket-cli-response-loss-"));
   const server = await startServer(directory);
   let attempts = 0;
@@ -213,7 +223,7 @@ test("CLI lost write response: real commit is not retried and is reported as unc
   }
 });
 
-test("CLI closed stdout pipe: committed write returns an uncertainty diagnostic instead of SIGPIPE", { timeout: 30000 }, async () => {
+isolatedTest("CLI closed stdout pipe: committed write returns an uncertainty diagnostic instead of SIGPIPE", { timeout: 30000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "docket-cli-broken-pipe-"));
   const server = await startServer(directory);
   try {
@@ -238,7 +248,7 @@ test("CLI closed stdout pipe: committed write returns an uncertainty diagnostic 
   }
 });
 
-test("CLI project init: folder binding, inherited scope, three repeat choices, and archived ticket counts", { timeout: 60000 }, async () => {
+isolatedTest("CLI project init: folder binding, inherited scope, three repeat choices, and archived ticket counts", { timeout: 60000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "docket-init-"));
   const folder = join(directory, "work");
   await mkdir(folder);
@@ -248,9 +258,9 @@ test("CLI project init: folder binding, inherited scope, three repeat choices, a
     const initialized = await inFolder(["project", "init", "--server", server.origin, "--name", "Folder project", "--key", "FOLDER"]);
     assert.equal(initialized.code, 0, initialized.stderr);
     const first = JSON.parse(initialized.stdout).project;
-    const markerPath = join(folder, ".docket");
+    const markerPath = join(homeContext.getStore(), ".docket", "registry.json");
     const originalMarker = await readFile(markerPath, "utf8");
-    assert.equal(JSON.parse(originalMarker).project_url, `${server.origin}/projects/${first.id}`);
+    assert.equal(JSON.parse(originalMarker).bindings[0].project_url, `${server.origin}/projects/${first.id}`);
     const created = await inFolder(["ticket", "create", "--title", "Uses this folder"]);
     assert.equal(created.code, 0, created.stderr);
     const ticket = JSON.parse(created.stdout);
@@ -284,13 +294,13 @@ test("CLI project init: folder binding, inherited scope, three repeat choices, a
     assert.equal(JSON.parse(fresh.stdout).project_id, third.id);
     const oldTicket = await cli(["ticket", "get", String(ticket.id), "--project", String(first.id), "--server", server.origin]);
     assert.equal(JSON.parse(oldTicket.stdout).archived, true, "Existing tickets must remain intact");
-    await assert.rejects(stat(join(folder, ".docket.lock")), { code: "ENOENT" });
+    await assert.rejects(stat(join(homeContext.getStore(), ".docket", "init.lock")), { code: "ENOENT" });
   } finally {
     try { await stopServer(server.child); } finally { await rm(directory, { recursive: true, force: true }); }
   }
 });
 
-test("CLI project init: interactive default and replacement choices, marker validation, and safe overrides", { timeout: 60000 }, async () => {
+isolatedTest("CLI project init: interactive default and replacement choices, marker validation, and safe overrides", { timeout: 60000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "docket-init-prompt-"));
   const folder = join(directory, "work");
   await mkdir(folder);
@@ -300,7 +310,7 @@ test("CLI project init: interactive default and replacement choices, marker vali
     const initial = await command(["project", "init", "--server", server.origin, "--name", "First", "--key", "FIRST"]);
     assert.equal(initial.code, 0, initial.stderr);
     const first = JSON.parse(initial.stdout).project;
-    const marker = join(folder, ".docket");
+    const marker = join(homeContext.getStore(), ".docket", "registry.json");
     const original = await readFile(marker, "utf8");
     const keep = await command(["project", "init", "--interactive"], { stdin: "\n" });
     assert.equal(keep.code, 0, keep.stderr);
@@ -321,11 +331,11 @@ test("CLI project init: interactive default and replacement choices, marker vali
     const duplicate = await command(["project", "init", "--on-existing", "create", "--name", "Duplicate", "--key", "THIRD"]);
     assert.equal(duplicate.code, 4);
     assert.equal(await readFile(marker, "utf8"), markerThird);
-    await assert.rejects(stat(join(folder, ".docket.lock")), { code: "ENOENT" });
+    await assert.rejects(stat(join(homeContext.getStore(), ".docket", "init.lock")), { code: "ENOENT" });
     const retarget = await command(["ticket", "create", "--title", "Do not retarget", "--server", "http://127.0.0.1:0"]);
     assert.equal(retarget.code, 2);
     const wrongIdentity = JSON.parse(markerThird);
-    wrongIdentity.project_created_at = "2000-01-01T00:00:00Z";
+    wrongIdentity.bindings[0].project_created_at = "2000-01-01T00:00:00Z";
     await writeFile(marker, JSON.stringify(wrongIdentity), { mode: 0o600 });
     const stale = await command(["ticket", "create", "--title", "Do not create on changed identity"]);
     assert.equal(stale.code, 2);
@@ -366,7 +376,7 @@ async function forwardInitializationRequest(request, origin) {
   });
 }
 
-test("CLI project init: lost creation response retains recovery journal and prevents duplicate writes", { timeout: 60000 }, async () => {
+isolatedTest("CLI project init: lost creation response retains recovery journal and prevents duplicate writes", { timeout: 60000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "docket-init-lost-"));
   const folder = join(directory, "work");
   await mkdir(folder);
@@ -386,11 +396,15 @@ test("CLI project init: lost creation response retains recovery journal and prev
   await new Promise(resolve => proxy.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${proxy.address().port}`;
   try {
+    const otherFolder = join(directory,"other");
+    await mkdir(otherFolder);
+    const other = await cli(["project","init","--server",server.origin,"--name","Other","--key","OTHERINIT"],{cwd:otherFolder});
+    assert.equal(other.code,0,other.stderr);
     const args = ["project", "init", "--server", origin, "--name", "Lost reply", "--key", "LOSTINIT"];
     const lost = await cli(args, { cwd: folder });
     assert.equal(lost.code, 6, lost.stderr);
     assert.equal(mutations, 1);
-    const journal = JSON.parse(await readFile(join(folder, ".docket.lock"), "utf8"));
+    const journal = JSON.parse(await readFile(join(homeContext.getStore(), ".docket", "init.lock"), "utf8"));
     assert.equal(journal.stage, "creating");
     assert.equal(journal.requested_key, "LOSTINIT");
     await assert.rejects(stat(join(folder, ".docket")), { code: "ENOENT" });
@@ -401,7 +415,10 @@ test("CLI project init: lost creation response retains recovery journal and prev
     assert.equal(mutations, 1, "Pending initialization must not be retried");
     const projects = await cli(["project", "list", "--server", server.origin], { cwd: directory });
     assert.equal(projects.code, 0, projects.stderr);
-    assert.equal(JSON.parse(projects.stdout).items.length, 1, "Exactly one real project committed");
+    assert.equal(JSON.parse(projects.stdout).items.filter(project=>project.key==="LOSTINIT").length,1,"Exactly one lost-response creation committed");
+    const unrelated = await cli(["ticket","create","--title","Other folder remains usable"],{cwd:otherFolder});
+    assert.equal(unrelated.code,0,unrelated.stderr);
+    assert.equal(JSON.parse(unrelated.stdout).project_id,JSON.parse(other.stdout).project.id);
   } finally {
     try { await new Promise(resolve => proxy.close(resolve)); } finally {
       try { await stopServer(server.child); } finally { await rm(directory, { recursive: true, force: true }); }
@@ -409,7 +426,7 @@ test("CLI project init: lost creation response retains recovery journal and prev
   }
 });
 
-test("CLI project init: concurrent attempts create only one project", { timeout: 60000 }, async () => {
+isolatedTest("CLI project init: concurrent attempts create only one project", { timeout: 60000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "docket-init-concurrent-"));
   const folder = join(directory, "work");
   await mkdir(folder);
@@ -422,14 +439,14 @@ test("CLI project init: concurrent attempts create only one project", { timeout:
     assert.equal(JSON.parse(projects.stdout).items.length, 1);
     const listed = await cli(["ticket", "list"], { cwd: folder });
     assert.equal(listed.code, 0, listed.stderr);
-    await assert.rejects(stat(join(folder, ".docket.lock")), { code: "ENOENT" });
+    await assert.rejects(stat(join(homeContext.getStore(), ".docket", "init.lock")), { code: "ENOENT" });
   } finally {
     try { await stopServer(server.child); } finally { await rm(directory, { recursive: true, force: true }); }
   }
 });
 
 for (const archiveFailure of ["stale", "invalid-success"]) {
-test(`CLI project init: ${archiveFailure} archival retains original marker and records created replacement for recovery`, { timeout: 60000 }, async () => {
+isolatedTest(`CLI project init: ${archiveFailure} archival retains original marker and records created replacement for recovery`, { timeout: 60000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "docket-init-partial-"));
   const folder = join(directory, "work");
   await mkdir(folder);
@@ -459,14 +476,14 @@ test(`CLI project init: ${archiveFailure} archival retains original marker and r
     const initial = await cli(["project", "init", "--server", origin, "--name", "Original", "--key", "ORIGINAL"], { cwd: folder });
     assert.equal(initial.code, 0, initial.stderr);
     original = JSON.parse(initial.stdout).project;
-    const marker = await readFile(join(folder, ".docket"), "utf8");
+    const marker = await readFile(join(homeContext.getStore(), ".docket", "registry.json"), "utf8");
     conflict = true;
     const replaced = await cli(["project", "init", "--on-existing", "archive", "--name", "Replacement", "--key", "REPLACE"], { cwd: folder });
     assert.equal(replaced.code, 6, replaced.stderr);
     assert.equal(JSON.parse(replaced.stderr).error.code, "init_incomplete");
     assert.equal(conflict, false, "The real stale-write path must have been exercised");
-    assert.equal(await readFile(join(folder, ".docket"), "utf8"), marker);
-    const journal = JSON.parse(await readFile(join(folder, ".docket.lock"), "utf8"));
+    assert.equal(await readFile(join(homeContext.getStore(), ".docket", "registry.json"), "utf8"), marker);
+    const journal = JSON.parse(await readFile(join(homeContext.getStore(), ".docket", "init.lock"), "utf8"));
     assert.equal(journal.stage, "archiving_previous");
     assert.match(journal.created_project_url, /\/projects\/2$/);
     const projects = await cli(["project", "list", "--server", server.origin], { cwd: directory });
@@ -483,3 +500,142 @@ test(`CLI project init: ${archiveFailure} archival retains original marker and r
 });
 
 }
+
+isolatedTest("central registry keeps independent folder boards in HOME and migrates legacy markers without creating boards", { timeout: 60000 }, async (_context, home) => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-central-registry-"));
+  const firstFolder = join(directory,"first");
+  const otherFolder = join(directory,"other");
+  const legacyFolder = join(directory,"legacy");
+  await Promise.all([firstFolder,otherFolder,legacyFolder].map(folder => mkdir(folder)));
+  const server = await startServer(directory);
+  try {
+    const first = await cli(["project","init","--name","First","--key","FIRST","--server",server.origin],{cwd:firstFolder});
+    assert.equal(first.code,0,first.stderr);
+    const registryPath = join(home,".docket","registry.json");
+    const registry = JSON.parse(await readFile(registryPath,"utf8"));
+    assert.equal(registry.bindings.length,1);
+    assert.equal(registry.bindings[0].folder,await realpath(firstFolder));
+    await assert.rejects(stat(join(firstFolder,".docket")),{code:"ENOENT"});
+    await assert.rejects(stat(join(firstFolder,".docket.lock")),{code:"ENOENT"});
+    const other = await cli(["project","init","--name","Other","--key","OTHER","--server",server.origin],{cwd:otherFolder});
+    assert.equal(other.code,0,other.stderr);
+    assert.equal(JSON.parse(await readFile(registryPath,"utf8")).bindings.length,2);
+    for (const [folder,project] of [[firstFolder,JSON.parse(first.stdout).project],[otherFolder,JSON.parse(other.stdout).project]]) {
+      const created = await cli(["ticket","create","--title","Bound to this folder"],{cwd:folder});
+      assert.equal(created.code,0,created.stderr);
+      assert.equal(JSON.parse(created.stdout).project_id,project.id);
+      assert.deepEqual(await readdir(folder),[]);
+    }
+    const alias=join(directory,"alias");
+    await symlink(firstFolder,alias);
+    const aliasResult=await cli(["ticket","list"],{cwd:alias});
+    assert.equal(aliasResult.code,0,aliasResult.stderr);
+    assert.equal(JSON.parse(aliasResult.stdout).items[0].project_id,JSON.parse(first.stdout).project.id);
+    const unregistered=join(directory,"first-other");
+    await mkdir(unregistered);
+    assert.equal((await cli(["ticket","list"],{cwd:unregistered})).code,2,"Similar folder prefixes must not inherit another board");
+    const projectResult = await cli(["project","create","--name","Legacy","--key","LEGACY","--server",server.origin]);
+    assert.equal(projectResult.code,0,projectResult.stderr);
+    const project = JSON.parse(projectResult.stdout);
+    const legacyPath = join(legacyFolder,".docket");
+    await writeFile(legacyPath,JSON.stringify({version:1,project_url:`${server.origin}/projects/${project.id}`,project_key:project.key,project_created_at:project.created_at}),{mode:0o600});
+    const imported = await cli(["project","init","--on-existing","keep"],{cwd:legacyFolder});
+    assert.equal(imported.code,0,imported.stderr);
+    assert.equal(JSON.parse(imported.stdout).project.id,project.id);
+    await assert.rejects(stat(legacyPath),{code:"ENOENT"});
+    const finalRegistry = JSON.parse(await readFile(registryPath,"utf8"));
+    assert.equal(finalRegistry.bindings.length,3);
+    const projects = await cli(["project","list","--server",server.origin]);
+    assert.equal(JSON.parse(projects.stdout).items.length,3,"Migration must not create another remote board");
+  } finally { try { await stopServer(server.child); } finally { await rm(directory,{recursive:true,force:true}); } }
+});
+
+isolatedTest("central registry serializes concurrent folder initialization without losing unrelated bindings", { timeout: 60000 }, async (_context,home) => {
+  const directory = await mkdtemp(join(tmpdir(),"docket-registry-concurrent-"));
+  const folders = [join(directory,"first"),join(directory,"other")];
+  await Promise.all(folders.map(folder=>mkdir(folder)));
+  const server = await startServer(directory);
+  try {
+    const argumentsFor = index => ["project","init","--server",server.origin,"--name",`Folder ${index}`,"--key",index===0 ? "FIRST" : "OTHER"];
+    const results=await Promise.all(folders.map((folder,index)=>cli(argumentsFor(index),{cwd:folder})));
+    for (let i=0;i<results.length;i++) {
+      if(results[i].code===2) results[i]=await cli(argumentsFor(i),{cwd:folders[i]});
+      assert.equal(results[i].code,0,results[i].stderr);
+    }
+    const registry=JSON.parse(await readFile(join(home,".docket","registry.json"),"utf8"));
+    assert.equal(registry.bindings.length,2);
+    for(let i=0;i<folders.length;i++) {
+      const canonicalFolder=await realpath(folders[i]);
+      assert.equal(registry.bindings.find(binding=>binding.folder===canonicalFolder).project_key,i===0 ? "FIRST" : "OTHER");
+      assert.deepEqual(await readdir(folders[i]),[]);
+    }
+    const projects=await cli(["project","list","--server",server.origin]);
+    assert.equal(JSON.parse(projects.stdout).items.length,2,"Lock conflicts must not create extra boards");
+  } finally { try { await stopServer(server.child); } finally { await rm(directory,{recursive:true,force:true}); } }
+});
+
+isolatedTest("central and legacy binding conflicts fail closed without rewriting either location", { timeout: 60000 }, async (_context,home) => {
+  const directory=await mkdtemp(join(tmpdir(),"docket-registry-conflict-"));
+  const folder=join(directory,"work");
+  await mkdir(folder);
+  const server=await startServer(directory);
+  try {
+    const initial=await cli(["project","init","--name","Initial","--key","INITIAL","--server",server.origin],{cwd:folder});
+    assert.equal(initial.code,0,initial.stderr);
+    const another=await cli(["project","create","--name","Foreign","--key","FOREIGN","--server",server.origin]);
+    assert.equal(another.code,0,another.stderr);
+    const foreign=JSON.parse(another.stdout);
+    const legacy=JSON.stringify({version:1,project_url:`${server.origin}/projects/${foreign.id}`,project_key:foreign.key,project_created_at:foreign.created_at});
+    await writeFile(join(folder,".docket"),legacy,{mode:0o600});
+    const path=join(home,".docket","registry.json");
+    const before=await readFile(path,"utf8");
+    const refused=await cli(["project","init","--on-existing","keep"],{cwd:folder});
+    assert.equal(refused.code,2);
+    assert.match(JSON.parse(refused.stderr).error.message,/disagree/);
+    assert.equal((await cli(["ticket","create","--title","Must not choose"],{cwd:folder})).code,2);
+    assert.equal(await readFile(path,"utf8"),before);
+    assert.equal(await readFile(join(folder,".docket"),"utf8"),legacy);
+    const explicit=await cli(["ticket","list","--project",String(foreign.id),"--server",server.origin],{cwd:folder});
+    assert.equal(JSON.parse(explicit.stdout).items.length,0);
+  } finally { try { await stopServer(server.child); } finally { await rm(directory,{recursive:true,force:true}); } }
+});
+
+isolatedTest("central registry retains external edits made during a remote init write", { timeout: 60000 }, async (_context,home) => {
+  const directory=await mkdtemp(join(tmpdir(),"docket-registry-edited-"));
+  const folder=join(directory,"work");
+  await mkdir(folder);
+  const server=await startServer(directory);
+  const path=join(home,".docket","registry.json");
+  let edit=false;
+  let external;
+  const proxy=http.createServer(async(request,response)=>{
+    try {
+      const upstream=await forwardInitializationRequest(request,server.origin);
+      const payload=await upstream.text();
+      if(edit && request.method==="POST") {
+        edit=false;
+        external=(await readFile(path,"utf8"))+"\n";
+        await writeFile(path,external,{mode:0o600});
+      }
+      response.writeHead(upstream.status,{"Content-Type":"application/json"});
+      response.end(payload);
+    } catch { response.destroy(); }
+  });
+  await new Promise(resolve=>proxy.listen(0,"127.0.0.1",resolve));
+  const origin=`http://127.0.0.1:${proxy.address().port}`;
+  try {
+    const first=await cli(["project","init","--server",origin,"--name","Original","--key","ORIGINAL"],{cwd:folder});
+    assert.equal(first.code,0,first.stderr);
+    edit=true;
+    const replacement=await cli(["project","init","--on-existing","create","--name","Another","--key","ANOTHER"],{cwd:folder});
+    assert.equal(replacement.code,6,replacement.stderr);
+    assert.equal(edit,false);
+    assert.equal(await readFile(path,"utf8"),external,"External metadata must not be overwritten");
+    const journal=JSON.parse(await readFile(join(home,".docket","init.lock"),"utf8"));
+    assert.equal(journal.stage,"binding");
+    assert.match(journal.created_project_url,/\/projects\/2$/);
+    const projects=await cli(["project","list","--server",server.origin]);
+    assert.equal(JSON.parse(projects.stdout).items.length,2,"Exactly one replacement was created");
+    assert.equal((await cli(["ticket","list"],{cwd:folder})).code,2,"Affected implicit scope must stop for reconciliation");
+  } finally { try { await new Promise(resolve=>proxy.close(resolve)); } finally { try { await stopServer(server.child); } finally { await rm(directory,{recursive:true,force:true}); } } }
+});
