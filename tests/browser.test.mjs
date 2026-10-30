@@ -1244,6 +1244,8 @@ test("Queue identity: shared sidebar/favicon asset, crisp small sizes, responsiv
     assert.match(await browser("eval", `(async () => {
       const mark = document.querySelector('img.brand-mark');
       if (!mark) throw new Error('Queue sidebar logo must be a vector image, not the old italic letter');
+      const sidebar = document.querySelector('.sidebar');
+      if (sidebar.querySelector('.sidebar-bottom, .connection-dot') || /Private workspace|No authentication/.test(sidebar.textContent)) throw new Error('Removed workspace footer must not remain in the sidebar');
       await mark.decode();
       const favicon = document.querySelector('link[rel="icon"]');
       if (!favicon || mark.currentSrc !== favicon.href) throw new Error('Sidebar and favicon must use the same canonical asset');
@@ -1290,8 +1292,55 @@ test("Queue identity: shared sidebar/favicon asset, crisp small sizes, responsiv
     await browser("press", "Tab");
     assert.match(await browser("eval", "document.activeElement.matches('a.brand') && document.activeElement.matches(':focus-visible')"), /true/);
     await browser("press", "Enter");
-    await browser("wait", "--url", server.origin + "/");
-    assert.deepEqual(await request(server.origin, `/api/projects/${project.id}`), project, "Logo navigation must not modify project data");
+    await browser("wait", "--fn", `location.pathname === '/projects/${project.id}' && document.getElementById('project-name').textContent === 'Logo fixture'`);
+    assert.deepEqual(await request(server.origin, `/api/projects/${project.id}`), project, "Logo navigation must settle on the active project without modifying data");
+  } finally {
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("home navigation skips archived defaults, preserves archived deep links, and welcomes when no active projects remain", { timeout: 60000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-home-archive-"));
+  const session = `docket-home-archive-${process.pid}`;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  try {
+    await browser("open", server.origin);
+    await browser("wait", "--load", "networkidle");
+    assert.match(await browser("eval", "location.pathname === '/' && !document.getElementById('welcome').hidden"), /true/, "An empty workspace must show welcome");
+    const first = await request(server.origin, "/api/projects", "POST", { name: "Archived first project", key: "OLD" });
+    const archived = await request(server.origin, `/api/projects/${first.id}`, "PATCH", { archived:true }, first.version);
+    const active = await request(server.origin, "/api/projects", "POST", { name: "Active project", key: "ACTIVE" });
+    await browser("open", server.origin);
+    await browser("wait", "--fn", "document.querySelector('.column') !== null");
+    assert.match(await browser("eval", `(() => {
+      if (location.pathname !== '/projects/${active.id}' || document.getElementById('project-name').textContent !== 'Active project') throw new Error('Home selected an archived project instead of the first active project');
+      if (!document.getElementById('archived-banner').hidden || document.getElementById('active-projects').getAttribute('aria-pressed') !== 'true') throw new Error('Home must show active project scope');
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("open", `${server.origin}/projects/${archived.id}`);
+    await browser("wait", "--fn", "!document.getElementById('archived-banner').hidden");
+    assert.match(await browser("eval", `location.pathname === '/projects/${archived.id}' && document.getElementById('project-name').textContent === 'Archived first project'`), /true/);
+    await browser("click", "a.brand");
+    await browser("wait", "--fn", `document.querySelector('.column') !== null && location.pathname === '/projects/${active.id}'`);
+    assert.match(await browser("eval", "document.getElementById('project-name').textContent === 'Active project' && document.getElementById('archived-banner').hidden"), /true/);
+    const archivedSecond = await request(server.origin, `/api/projects/${active.id}`, "PATCH", { archived:true }, active.version);
+    await browser("open", `${server.origin}/projects/${archived.id}`);
+    await browser("wait", "--fn", "!document.getElementById('archived-banner').hidden");
+    await browser("click", "a.brand");
+    await browser("wait", "--fn", "document.querySelector('#archived-projects span')?.textContent === '2' && document.getElementById('content').getAttribute('aria-busy') === 'false'");
+    await browser("wait", "--load", "networkidle");
+    assert.match(await browser("eval", `(() => {
+      if (location.pathname!=='/' || document.getElementById('welcome').hidden || document.getElementById('project-name').textContent!=='Overview') throw new Error('All-archived workspace must remain on welcome instead of redirecting');
+      if (!document.getElementById('archived-banner').hidden || !document.getElementById('content').hidden) throw new Error('Archived board leaked into welcome');
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("click", "#archived-projects");
+    await browser("wait", "--fn", "document.querySelectorAll('.project-link').length === 2");
+    await browser("click", ".project-link");
+    await browser("wait", "--fn", `location.pathname === '/projects/${archived.id}' && !document.getElementById('archived-banner').hidden`);
+    assert.deepEqual(await request(server.origin, `/api/projects/${first.id}`), archived);
+    assert.deepEqual(await request(server.origin, `/api/projects/${active.id}`), archivedSecond);
   } finally {
     try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
   }

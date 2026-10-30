@@ -49,9 +49,6 @@ button:where(:has(>.icon)){display:inline-flex;align-items:center;justify-conten
 .project-link .project-letter{font-size:10px;border:1px solid #44404e;color:#b8accf;width:19px;height:19px;border-radius:4px;display:grid;place-items:center;flex-shrink:0}
 .project-link .project-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .new-project-button{justify-content:flex-start;color:#73737a;font-size:12px;text-align:left;margin-top:8px;padding-left:12px}
-.sidebar-bottom{margin-top:auto;color:#96969d;font-size:11px;line-height:1.8;padding:25px 9px 0}
-.sidebar-bottom small{font-size:9px}
-.connection-dot{display:inline-block;width:5px;height:5px;background:#8faa92;border-radius:50%;margin-right:6px}
 main{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;border:1px solid #232325;border-radius:13px;margin:9px 9px 9px 0;overflow:hidden;background:#131314}
 .header,.toolbar,.archived-banner,.pagination{flex-shrink:0}
 /* Nested flex items must shrink below their content height so long ticket lists cannot expand the page. */
@@ -246,7 +243,7 @@ dialog::backdrop{background:#0008;backdrop-filter:blur(3px)}
 .brand{margin:0 4px 15px;font-size:16px}
 .local-badge{margin-left:0}
 .sidebar-label{position:absolute;right:15px;top:16px;margin:0}
-.sidebar-label>span,.sidebar-bottom,.new-project-button{display:none}
+.sidebar-label>span,.new-project-button{display:none}
 .sidebar nav{display:flex;gap:5px;overflow-x:auto;overflow-y:hidden;flex-shrink:0}
 .project-link{width:auto;max-width:220px;flex-shrink:0;font-size:12px;padding:7px 10px}
 .project-link .project-letter{width:16px;height:16px}

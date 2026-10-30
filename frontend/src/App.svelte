@@ -221,9 +221,9 @@
     await loadProjects();
     const match = location.pathname.match(/^\/projects\/(\d+)$/);
     if (match) await loadProject(Number(match[1]));
-    else if (projects.length) {
-      await loadProject(projects[0].id);
-      history.replaceState({}, "", `/projects/${projects[0].id}`);
+    else {
+      const activeProject = projects.find((item) => !item.archived);
+      if (activeProject && await loadProject(activeProject.id)) history.replaceState({}, "", `/projects/${activeProject.id}`);
     }
   }
   function popstate(): void {
@@ -253,7 +253,6 @@
     {/each}
   </nav>
   <button id="sidebar-new" class="new-project-button" onclick={() => projectDialog.open(null)}><Icon name="plus" /> New project</button>
-  <div class="sidebar-bottom"><span class="connection-dot"></span> Private workspace<br><small>No authentication · trusted network only</small></div>
 </aside>
 <main>
   <header class="header"><div class="breadcrumb"><span class="muted">Workspace</span><span class="slash">/</span><h1 id="project-name">{project?.name ?? "Overview"}</h1></div><div class="header-actions"><button id="copy-project-url" class="icon-button" title="Copy project URL" aria-label="Copy project URL" hidden={!project} onclick={() => run(copyProjectURL)}><Icon name="link" /></button><button id="project-settings" class="icon-button" title="Project settings" aria-label="Project settings" hidden={!project} onclick={() => projectDialog.open(project)}><Icon name="settings" /></button><button id="new-ticket" class="primary" hidden={!project} onclick={() => { if (project) run(() => ticketDialog.open(project!, null)); }}><Icon name="plus" /> New ticket</button></div></header>
