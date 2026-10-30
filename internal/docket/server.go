@@ -49,6 +49,7 @@ func NewServer(store *Store, publicURL string) (http.Handler, error) {
 	mux.HandleFunc("GET /api/projects", server.projects)
 	mux.HandleFunc("POST /api/projects", server.createProject)
 	mux.HandleFunc("GET /api/projects/{project}", server.project)
+	mux.HandleFunc("GET /api/projects/{project}/stats", server.projectStats)
 	mux.HandleFunc("PATCH /api/projects/{project}", server.updateProject)
 	mux.HandleFunc("GET /api/projects/{project}/tickets", server.tickets)
 	mux.HandleFunc("POST /api/projects/{project}/tickets", server.createTicket)
@@ -296,6 +297,28 @@ func (server *Server) project(writer http.ResponseWriter, request *http.Request)
 	}
 	writer.Header().Set("ETag", strconv.Quote(strconv.FormatInt(project.Version, 10)))
 	server.send(writer, 200, project)
+}
+
+func (server *Server) projectStats(writer http.ResponseWriter, request *http.Request) {
+	projectID, _, err := identifiers(request)
+	if err != nil {
+		server.fail(writer, err)
+		return
+	}
+	if _, err := readProject(server.store.database.QueryRowContext(request.Context(), "SELECT "+projectColumns+" FROM projects WHERE id=?", projectID)); err != nil {
+		server.fail(writer, err)
+		return
+	}
+	var counts struct {
+		Total    int64 `json:"total"`
+		Active   int64 `json:"active"`
+		Archived int64 `json:"archived"`
+	}
+	if err := server.store.database.QueryRowContext(request.Context(), "SELECT COUNT(*),COALESCE(SUM(archived=0),0),COALESCE(SUM(archived=1),0) FROM tickets WHERE project_id=?", projectID).Scan(&counts.Total, &counts.Active, &counts.Archived); err != nil {
+		server.fail(writer, err)
+		return
+	}
+	server.send(writer, http.StatusOK, counts)
 }
 
 func (server *Server) createProject(writer http.ResponseWriter, request *http.Request) {

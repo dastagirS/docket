@@ -222,7 +222,20 @@ test("workflow editor: preview, inline rows, ordering, bounds, validation, and p
   const directory = await mkdtemp(join(tmpdir(), "docket-workflow-"));
   const session = `docket-workflow-${process.pid}`;
   const server = await startServer(join(directory, "test.sqlite"));
-  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  const browser = async (...arguments_) => {
+    if (arguments_[0] === "click") {
+      // The driver does not reliably scroll nested dialogs before clicking; hit-test to avoid masked controls.
+      await execute("agent-browser", ["--session", session, "eval", `(() => {
+        const control = document.querySelector(${JSON.stringify(arguments_[1])});
+        if (!control) throw new Error('Workflow control is missing');
+        control.scrollIntoView({block:'center'});
+        const bounds = control.getBoundingClientRect();
+        if (!control.contains(document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2))) throw new Error('Workflow control is covered or unreachable');
+        return true;
+      })()`], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax });
+    }
+    return (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  };
   const check = async (expression, message) => {
     assert.match(await browser("eval", `(() => { if (!(${expression})) throw new Error(${JSON.stringify(message)}); return 'PASS'; })()`), /PASS/);
   };
@@ -1116,6 +1129,105 @@ test("subtickets: one level, main-board visibility, parent navigation, live chil
     await browser("click", ".subticket-row");
     await browser("wait", "--fn", `document.getElementById('ticket-reference').textContent === 'TREE-${child.id}'`);
     assert.match(await browser("eval", "!document.getElementById('ticket-archived-banner').hidden && document.getElementById('add-subticket') === null"), /true/);
+  } finally {
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("form focus: white highlights, padded controls, neutral compact frames, keyboard focus, and readable selection", { timeout: 60000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-form-focus-"));
+  const session = `docket-form-focus-${process.pid}`;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  const focus = async (selector) => {
+    await browser("eval", `document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'center'}); true`);
+    await browser("click", selector);
+    assert.match(await browser("eval", `document.activeElement === document.querySelector(${JSON.stringify(selector)})`), /true/);
+  };
+  try {
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Form focus review", key: "FOCUS" });
+    const ticket = await request(server.origin, `/api/projects/${project.id}/tickets`, "POST", { title: "Comfortable field spacing", description: "Inspect focus and selection without saving this fixture.", assignee: "Review fixture" });
+    await browser("set", "viewport", "1440", "1000");
+    await browser("open", `${server.origin}/projects/${project.id}`);
+    await browser("wait", ".ticket-card");
+    await browser("click", ".ticket-card");
+    await focus("#ticket-title");
+    assert.match(await browser("eval", `(() => {
+      if (getComputedStyle(document.getElementById('ticket-title')).outlineColor !== 'rgb(255, 255, 255)') throw new Error('Text field focus must be white, not pink/purple');
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("click", "#close-ticket");
+    for (const [width, height] of [[1440, 1000], [390, 844], [390, 600]]) {
+      await browser("set", "viewport", String(width), String(height));
+      await browser("click", ".ticket-card");
+      for (const selector of ["#ticket-title", "#ticket-assignee", "#ticket-description", "#comment-body"]) {
+        await focus(selector);
+        assert.match(await browser("eval", `(() => {
+          const field = document.querySelector(${JSON.stringify(selector)});
+          const style = getComputedStyle(field);
+          if (style.outlineColor !== 'rgb(255, 255, 255)' || style.outlineStyle !== 'solid' || style.outlineOffset !== '2px') throw new Error('Inconsistent field focus');
+          if (style.paddingTop !== '10px' || style.paddingBottom !== '10px' || style.paddingLeft !== '12px' || style.paddingRight !== '12px') throw new Error('Text fields need comfortable, consistent internal padding');
+          const selection = getComputedStyle(field, '::selection');
+          if (selection.backgroundColor !== 'rgb(255, 255, 255)' || selection.color !== 'rgb(16, 16, 17)') throw new Error('Selection must have white background and dark text');
+          const dialog = document.getElementById('ticket-dialog');
+          const bounds = field.getBoundingClientRect(), frame = dialog.getBoundingClientRect();
+          if (bounds.left - 3 < frame.left || bounds.right + 3 > frame.right || dialog.scrollWidth > dialog.clientWidth) throw new Error('Focus frame is clipped or causes horizontal overflow');
+          return 'PASS';
+        })()`), /PASS/);
+      }
+      await focus("#ticket-title");
+      await browser("press", "Control+a");
+      assert.match(await browser("eval", "document.getElementById('ticket-title').selectionStart === 0 && document.getElementById('ticket-title').selectionEnd === document.getElementById('ticket-title').value.length"), /true/);
+      if (process.env.DOCKET_SCREENSHOTS) {
+        await mkdir(process.env.DOCKET_SCREENSHOTS, { recursive: true });
+        await browser("screenshot", join(process.env.DOCKET_SCREENSHOTS, `form-title-selection-${width}-${height}.png`));
+      }
+      await browser("press", "Tab");
+      assert.match(await browser("eval", "document.activeElement.id === 'ticket-status' && getComputedStyle(document.activeElement).outlineColor === 'rgb(255, 255, 255)' && getComputedStyle(document.activeElement).paddingLeft === '12px'"), /true/);
+      await browser("press", "Shift+Tab");
+      await browser("press", "Shift+Tab");
+      assert.match(await browser("eval", "document.activeElement.id === 'close-ticket' && document.activeElement.matches(':focus-visible') && getComputedStyle(document.activeElement).outlineColor === 'rgb(255, 255, 255)'"), /true/);
+      await browser("click", "#close-ticket");
+      await focus("#search");
+      assert.match(await browser("eval", `(() => {
+        const field = document.getElementById('search'), frame = field.closest('.search-label');
+        const style = getComputedStyle(frame), bounds = frame.getBoundingClientRect();
+        if (style.borderColor !== 'rgb(255, 255, 255)' || style.paddingLeft !== '10px' || style.paddingRight !== '10px') throw new Error('Search needs one padded white frame around icon and text');
+        if (getComputedStyle(field).outlineStyle !== 'none') throw new Error('Search has duplicate focus frames');
+        if (bounds.left < 0 || bounds.right > innerWidth) throw new Error('Search frame overflows on narrow screens');
+        return 'PASS';
+      })()`), /PASS/);
+      if (process.env.DOCKET_SCREENSHOTS) await browser("screenshot", join(process.env.DOCKET_SCREENSHOTS, `form-search-focus-${width}-${height}.png`));
+      await browser("click", "#project-settings");
+      await focus("#project-title");
+      assert.match(await browser("eval", "getComputedStyle(document.activeElement).outlineColor === 'rgb(255, 255, 255)' && getComputedStyle(document.activeElement).paddingLeft === '12px'"), /true/);
+      await focus(".status-row:nth-child(1) .status-name");
+      await browser("wait", "--fn", "getComputedStyle(document.activeElement.closest('.status-row')).borderColor === 'rgb(255, 255, 255)'");
+      assert.match(await browser("eval", `(() => {
+        const input = document.activeElement, row = input.closest('.status-row');
+        if (getComputedStyle(input).outlineStyle !== 'none' || getComputedStyle(input).paddingLeft !== '8px') throw new Error('Workflow input is cramped or has a duplicate outline');
+        if (getComputedStyle(row).borderColor !== 'rgb(255, 255, 255)' || getComputedStyle(row).backgroundColor !== 'rgb(29, 29, 31)') throw new Error('Workflow focus needs a neutral background and white frame');
+        const dialog = document.getElementById('project-dialog');
+        if (dialog.scrollWidth > dialog.clientWidth) throw new Error('Padded workflow overflows phone dialog');
+        return 'PASS';
+      })()`), /PASS/);
+      if (process.env.DOCKET_SCREENSHOTS) await browser("screenshot", join(process.env.DOCKET_SCREENSHOTS, `form-status-focus-${width}-${height}.png`));
+      await browser("click", "#cancel-project");
+    }
+    await browser("click", "#project-settings");
+    await browser("fill", ".status-row:nth-child(1) .status-name", "In Progress");
+    await browser("click", "#save-project");
+    await browser("wait", "--fn", "document.querySelector('.status-row.status-invalid') !== null && getComputedStyle(document.querySelector('.status-row.status-invalid')).borderColor === 'rgb(165, 108, 120)'");
+    assert.match(await browser("eval", "getComputedStyle(document.querySelector('.status-row.status-invalid')).borderColor === 'rgb(165, 108, 120)' && getComputedStyle(document.getElementById('status-error')).color === 'rgb(244, 161, 161)'"), /true/);
+    await browser("click", "#cancel-project");
+    await browser("click", "#add-project");
+    for (const selector of ["#project-title", "#project-key"]) {
+      await focus(selector);
+      assert.match(await browser("eval", "getComputedStyle(document.activeElement).outlineColor === 'rgb(255, 255, 255)' && getComputedStyle(document.activeElement).paddingLeft === '12px'"), /true/);
+    }
+    await browser("click", "#cancel-project");
+    assert.deepEqual(await request(server.origin, `/api/projects/${project.id}`), project, "Focus/validation checks must not save project changes");
+    assert.deepEqual(await request(server.origin, `/api/projects/${project.id}/tickets/${ticket.id}`), ticket, "Focus/selection checks must not modify ticket data");
   } finally {
     try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
   }

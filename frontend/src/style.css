@@ -1,6 +1,7 @@
 @font-face{font-family:Manrope;font-style:normal;font-weight:200 800;font-display:swap;src:url('/fonts/manrope-latin.woff2') format('woff2')}
-:root{color-scheme:dark;--base:#101011;--panel:#161617;--raised:#1d1d1f;--hover:#252528;--border:#29292c;--text:#ededee;--muted:#88888f;--accent:#a998eb;--danger:#f4a1a1;font-family:Manrope,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px;font-weight:450;font-optical-sizing:auto}
+:root{color-scheme:dark;--base:#101011;--panel:#161617;--raised:#1d1d1f;--hover:#252528;--border:#29292c;--text:#ededee;--muted:#88888f;--accent:#a998eb;--focus:#fff;--danger:#f4a1a1;font-family:Manrope,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px;font-weight:450;font-optical-sizing:auto}
 *{box-sizing:border-box}
+::selection{background:var(--focus);color:var(--base)}
 #app{display:contents}
 body{margin:0;background:var(--base);color:var(--text);display:flex;height:100dvh;overflow:hidden}
 button,input,textarea,select{font:inherit;line-height:1.4}
@@ -8,9 +9,9 @@ button,a,input,textarea,select{-webkit-tap-highlight-color:transparent}
 button{cursor:pointer;color:inherit;border:1px solid transparent;border-radius:7px;background:none;padding:7px 11px;transition:background .12s}
 button:hover{background:var(--hover)}
 button:disabled{opacity:.45;cursor:wait}
-button:focus-visible,a:focus-visible,.column-tickets:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
-input:focus,textarea:focus,select:focus{outline:1px solid #80749f;outline-offset:0}
-input,textarea,select{width:100%;border:1px solid var(--border);border-radius:7px;padding:10px 11px;background:#171719;color:var(--text)}
+button:focus-visible,a:focus-visible,.column-tickets:focus-visible{outline:2px solid var(--focus);outline-offset:3px}
+input:focus,textarea:focus,select:focus{outline:1px solid var(--focus);outline-offset:2px}
+input,textarea,select{width:100%;border:1px solid var(--border);border-radius:7px;padding:10px 12px;background:#171719;color:var(--text);caret-color:var(--focus)}
 textarea{resize:vertical;line-height:1.6}
 input::placeholder,textarea::placeholder{color:#68686f}
 label{display:block;margin-bottom:20px;font-size:12px;font-weight:500}
@@ -65,8 +66,11 @@ main{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;border:1
 .view-switch button{padding:5px 10px;color:var(--muted);font-size:12px}
 .view-switch button[aria-pressed=true]{color:var(--text);background:#2b2b2e}
 .toolbar-right{display:flex;align-items:center;gap:10px;margin-left:auto}
-.search-label{margin:0;display:flex;align-items:center;gap:8px;color:var(--muted);font-size:20px}
-.search-label input{border:0;background:transparent;font-size:12px;padding:6px 0;margin:0;max-width:175px;font-weight:400}
+.search-label{margin:0;display:flex;align-items:center;gap:8px;min-width:0;padding:6px 10px;border:1px solid transparent;border-radius:7px;color:var(--muted);font-size:20px}
+.search-label:focus-within{border-color:var(--focus);background:#171719}
+.search-label input{flex:1;min-width:0;border:0;background:transparent;font-size:12px;padding:0;margin:0;max-width:175px;font-weight:400}
+/* Search and workflow inputs use their padded parents' focus-within frame instead of nested outlines. */
+.search-label input:focus{outline:none}
 .welcome{flex:1;min-height:0;overflow-y:auto;display:flex;align-items:center;justify-content:safe center;flex-direction:column;text-align:center;padding:45px 20px}
 .welcome>*{flex-shrink:0}
 .welcome-mark{font:italic 55px Georgia,serif;color:#c5b7e8;width:72px;height:72px;background:linear-gradient(135deg,#30283e,#1c1922);border:1px solid #42374f;border-radius:19px;margin-bottom:27px;box-shadow:0 0 75px #a998eb0a}
@@ -159,12 +163,13 @@ dialog::backdrop{background:#0008;backdrop-filter:blur(3px)}
 .status-chip .status-dot{width:8px;height:8px}
 .status-list{display:grid;gap:4px;list-style:none;padding:0;margin:0;max-height:240px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#51405f transparent}
 .status-row{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:center;gap:7px;min-height:36px;padding:3px 6px;border:1px solid #302d35;border-radius:7px;background:#1b191e;transition:border-color .12s,background .12s}
-.status-row:focus-within{border-color:#655276;background:#211d28}
+.status-row:focus-within{border-color:var(--focus);background:var(--raised)}
 .status-row.status-invalid{border-color:#a56c78}
 .status-order{font:10px ui-monospace,SFMono-Regular,Consolas,monospace;color:#77717f;text-align:center;font-variant-numeric:tabular-nums}
 .status-title-line{display:flex;align-items:center;gap:5px;min-width:0}
 .status-title-line .status-dot{width:8px;height:8px}
-.status-name{flex:1;min-width:0;width:100%;padding:4px;border:1px solid transparent;border-radius:4px;background:transparent;font-size:12px;font-weight:500}
+.status-name{flex:1;min-width:0;width:100%;padding:8px;border:1px solid transparent;border-radius:4px;background:transparent;font-size:12px;font-weight:500}
+.status-name:focus{outline:none}
 .status-name:hover{background:#ffffff04}
 .status-name[aria-invalid=true]{border-color:#a56c78}
 .status-default{flex-shrink:0;padding:3px 5px;border:1px solid #4e405f;border-radius:4px;background:#33283f;color:#cbb9e3;font-size:9px;line-height:1;white-space:nowrap}
@@ -196,10 +201,9 @@ dialog::backdrop{background:#0008;backdrop-filter:blur(3px)}
 .ticket-top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:30px}
 .ticket-top-actions{display:flex;align-items:center;gap:8px}
 .ticket-dialog .archived-banner{border:1px solid var(--border);border-radius:7px;margin:-12px 0 20px;padding:10px 12px}
-.ticket-title{font-size:23px;letter-spacing:-.7px;font-weight:650;background:transparent;border:0;padding:0;resize:none;line-height:1.4;margin-bottom:18px;width:100%}
-.ticket-title:focus{outline-offset:5px}
+.ticket-title{font-size:23px;letter-spacing:-.7px;font-weight:650;background:transparent;border:1px solid transparent;padding:10px 12px;resize:none;line-height:1.4;margin-bottom:18px;width:100%}
 .status-label{display:flex;align-items:center;gap:16px;color:var(--muted);margin:0 0 27px}
-.status-label select{width:auto;min-width:145px;font-size:12px;margin:0;padding:7px 10px}
+.status-label select{width:auto;min-width:145px;font-size:12px;margin:0;padding:8px 12px}
 .ticket-parent{display:flex;align-items:center;gap:10px;margin-bottom:20px;font-size:11px}
 .subtickets{border-top:1px solid var(--border);padding-top:24px;margin-top:26px}
 .subtickets .section-heading{margin-bottom:14px}

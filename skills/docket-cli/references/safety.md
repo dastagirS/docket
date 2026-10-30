@@ -2,7 +2,7 @@
 
 ## Keep the two Docket interfaces separate
 
-The standalone CLI is an ordinary client of the unauthenticated HTTP API. It has no authenticated identity, repository pin, ownership receipt, assigned-ticket sandbox, claim, handoff, or delegation mechanism. Numeric project IDs and `--actor` labels are not access controls.
+The standalone CLI is an ordinary client of the unauthenticated HTTP API. It has no authenticated identity, integration-enforced repository pin, ownership receipt, assigned-ticket sandbox, claim, handoff, or delegation mechanism. The CLI's local `.docket` binding is a separate convenience, not an integration pin or ownership receipt. Numeric project IDs and `--actor` labels are not access controls.
 
 The separate Pi `docket`/worker tools can impose stricter workflow rules. When those tools are required by the session/repository:
 
@@ -25,7 +25,7 @@ Success is one JSON object on stdout. Failure is a JSON diagnostic on stderr. He
 | 3 | Missing/wrong-project record | Verify the authorized IDs; do not search another board to work around it |
 | 4 | Version/data conflict | Read and compare the latest state before proposing a revised change |
 | 5 | Read unavailable/timeout, oversized/interrupted read, or rate limiting | Report it; respect Retry-After and request/task budgets rather than polling |
-| 6 | Write outcome uncertain | Do not replay; inspect record/list/history and escalate ambiguity |
+| 6 | Write outcome uncertain or init incomplete | Do not replay; inspect record/list/history and escalate ambiguity |
 
 The error object contains `code`, `message`, and optionally `http_status`, `retry_after`, and `outcome_unknown`. Do not suppress it with shell fallbacks. The CLI never retries or follows redirects automatically.
 
@@ -56,3 +56,9 @@ There are no creation idempotency keys. Never add an automatic retry/backoff loo
 Routine ticket commands do not need `serve`, direct SQLite access, backup mode, installation, or service restarts. Do not run administration commands to recover an unavailable endpoint unless the human separately authorizes them. Never start a second server against the same database. Preserve the existing canonical public origin and trusted-network-only deployment.
 
 Archiving is reversible and organizational, not read-only or authorization. It does not delete history or cascade between project, parent, and child records. Do not reinterpret an archive request as permission for permanent deletion, closure of unrelated work, or changes to children.
+
+## Initialization recovery
+
+`project init` creation, old-project archival, and local binding are separate steps, not a single transaction. The replacement is created first; the old project's version is never silently refreshed. `.docket.lock` serializes init and records `creating`, `created`, `archiving_previous`, or `binding`. A partial/unknown outcome retains it and blocks implicit scope; no automatic replay or lock stealing occurs.
+
+A retained journal may identify a created replacement while the original marker still points to the old project. A rename followed by a disk-sync failure may already have changed the marker. Never assume either record is unchanged from the exit code alone. Confirm no init is running, obtain human recovery approval, and inspect journal, marker, and the approved server's projects/history with explicitly scoped authorized reads. Only after reconciling the intended old/new state and binding should the human remove the journal/staging files. If required Pi tools govern access, those rules still apply; this is not a workaround for their receipts.

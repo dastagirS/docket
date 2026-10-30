@@ -51,12 +51,30 @@ type apiCommand struct {
 	version int64
 	actor   string
 	timeout time.Duration
+	binding *folderBinding
 }
 
 func (command apiCommand) request() ([]byte, error) {
-	location, err := url.Parse(command.server)
-	if err != nil || location.Hostname() == "" || (location.Scheme != "http" && location.Scheme != "https") || location.User != nil || location.RawQuery != "" || location.ForceQuery || location.Fragment != "" || (location.Path != "" && location.Path != "/") || location.Opaque != "" {
-		return nil, errors.New("Server must be an http(s) origin without credentials, query, fragment, or subpath")
+	if command.binding != nil {
+		project, err := command.checkedProject(*command.binding)
+		if err != nil {
+			return nil, err
+		}
+		if project.Archived && command.method != http.MethodGet {
+			return nil, errors.New("Bound project is archived; restore it explicitly or use project init to select a new project")
+		}
+	}
+	return command.requestOnce()
+}
+
+func (command apiCommand) requestOnce() ([]byte, error) {
+	origin, err := serverOrigin(command.server)
+	if err != nil {
+		return nil, err
+	}
+	location, err := url.Parse(origin)
+	if err != nil {
+		return nil, errors.New("Invalid server origin")
 	}
 	if command.timeout <= 0 || command.timeout > requestTimeoutMax {
 		return nil, errors.New("Timeout must be positive and at most 1m")

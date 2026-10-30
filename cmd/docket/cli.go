@@ -25,12 +25,13 @@ const cliHelp = `Docket — ticket commands for humans and agents
 Usage:
   docket --skill [--references [filename]]
   docket doctor [options]
+  docket project init [options]
   docket project list|create [options]
   docket project get|update|archive|restore ID [options]
-  docket ticket list|create --project PROJECT [options]
-  docket ticket get|update|archive|restore|history ID --project PROJECT [options]
-  docket comment list|add TICKET --project PROJECT [options]
-  docket events list --project PROJECT [options]
+  docket ticket list|create [--project PROJECT] [options]
+  docket ticket get|update|archive|restore|history ID [--project PROJECT] [options]
+  docket comment list|add TICKET [--project PROJECT] [options]
+  docket events list [--project PROJECT] [options]
   docket serve [server options]
 
 Client results are JSON on stdout; errors are JSON on stderr. Help/skill output is Markdown/text.
@@ -38,7 +39,9 @@ Flags follow the command and its positional ID. Use COMMAND --help for flags.
 Writes to existing records require --version from a previous read.
 Use --input FILE (or - for stdin) for JSON write bodies instead of field flags.
 No service is auto-started and writes are never automatically retried.
-Server: --server, then DOCKET_URL, then http://127.0.0.1:7331.
+Initialize this folder with docket project init; .docket supplies scoped commands' project/server.
+Explicit --project bypasses folder defaults. Otherwise a bound server stays pinned.
+Unbound server: --server, then DOCKET_URL, then http://127.0.0.1:7331.
 Legacy server flags (--listen, --database, --public-url, --backup-to) still work.
 `
 
@@ -81,6 +84,19 @@ func execute(arguments []string, input io.Reader, output, diagnostics io.Writer)
 	if isServer {
 		if err := serve(serverArguments, diagnostics); err != nil {
 			return emitFailure(diagnostics, &cliFailure{Exit: exitFailure, Code: "server_error", Message: err.Error()})
+		}
+		return 0
+	}
+	if len(arguments) >= 2 && arguments[0] == "project" && arguments[1] == "init" {
+		payload, err := initializeProject(arguments[2:], input, diagnostics)
+		if err != nil {
+			return emitFailure(diagnostics, err)
+		}
+		if _, err := output.Write(append(payload, '\n')); err != nil {
+			if !json.Valid(payload) {
+				return emitFailure(diagnostics, &cliFailure{Exit: exitFailure, Code: "output_error", Message: "Cannot write initialization help"})
+			}
+			return emitFailure(diagnostics, &cliFailure{Exit: exitUncertain, Code: "outcome_unknown", Message: "Initialization result could not reach stdout; inspect .docket and .docket.lock before retrying", OutcomeUnknown: true})
 		}
 		return 0
 	}
@@ -191,24 +207,14 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 	flags := flag.NewFlagSet(noun+" "+action, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.Usage = func() {}
-	server := os.Getenv("DOCKET_URL")
-	if server == "" {
-		server = serverDefault
-	}
-	flags.StringVar(&command.server, "server", server, "Docket HTTP origin (DOCKET_URL)")
-	flags.DurationVar(&command.timeout, "timeout", requestTimeoutDefault, "HTTP timeout (positive, at most 1m)")
-	flags.StringVar(&command.actor, "actor", os.Getenv("DOCKET_ACTOR"), "Attribution label, not authentication (DOCKET_ACTOR)")
-	// Help must not echo environment values, which may accidentally contain credentials.
-	flags.Lookup("server").DefValue = serverDefault
-	flags.Lookup("actor").DefValue = ""
-	flags.Bool("json", true, "JSON output (always enabled)")
+	registerClientFlags(flags, &command)
 	var projectID, version, after, parentID int64
 	var limit int
 	var query, inputPath string
 	var archived bool
 	fields := map[string]*string{}
 	if noun == "ticket" || noun == "comment" || noun == "events" {
-		flags.Int64Var(&projectID, "project", 0, "Required project ID")
+		flags.Int64Var(&projectID, "project", 0, "Project ID; otherwise use this folder's .docket binding")
 	}
 	if write && action != "create" {
 		flags.Int64Var(&version, "version", 0, "Required current record version; never refreshed automatically")
@@ -275,8 +281,45 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 	if needsID && identifier <= 0 {
 		return command, "", errors.New("A positive record ID is required before flags")
 	}
-	if (noun == "ticket" || noun == "comment" || noun == "events") && projectID <= 0 {
-		return command, "", errors.New("An explicit positive --project is required")
+	if noun == "ticket" || noun == "comment" || noun == "events" {
+		if !seen["project"] {
+			binding, _, err := discoverBinding()
+			if err != nil {
+				return command, "", err
+			}
+			if binding == nil {
+				return command, "", errors.New("Supply --project or run docket project init in an authorized folder")
+			}
+			origin, identifier, err := binding.reference()
+			if err != nil {
+				return command, "", err
+			}
+			if seen["server"] {
+				selected, err := serverOrigin(command.server)
+				if err != nil || selected != origin {
+					return command, "", errors.New("A different --server requires an explicit --project; folder binding was not retargeted")
+				}
+			}
+			command.server = origin
+			projectID = identifier
+			command.binding = binding
+		}
+		if projectID <= 0 {
+			return command, "", errors.New("Project ID must be positive")
+		}
+	}
+	if (noun == "doctor" || noun == "project") && !seen["server"] {
+		binding, _, err := discoverBinding()
+		if err != nil {
+			return command, "", err
+		}
+		if binding != nil {
+			origin, _, err := binding.reference()
+			if err != nil {
+				return command, "", err
+			}
+			command.server = origin
+		}
 	}
 	if write && action != "create" && version <= 0 {
 		return command, "", errors.New("A positive --version from a previous read is required")
@@ -432,4 +475,18 @@ func readCommandInput(path string, input io.Reader, timeout time.Duration) (payl
 		return nil, errors.New("JSON input exceeds 64 KiB")
 	}
 	return payload, nil
+}
+
+func registerClientFlags(flags *flag.FlagSet, command *apiCommand) {
+	server := os.Getenv("DOCKET_URL")
+	if server == "" {
+		server = serverDefault
+	}
+	flags.StringVar(&command.server, "server", server, "Docket HTTP origin (DOCKET_URL)")
+	flags.DurationVar(&command.timeout, "timeout", requestTimeoutDefault, "HTTP timeout (positive, at most 1m)")
+	flags.StringVar(&command.actor, "actor", os.Getenv("DOCKET_ACTOR"), "Attribution label, not authentication (DOCKET_ACTOR)")
+	// Help must not echo environment values, which may accidentally contain credentials.
+	flags.Lookup("server").DefValue = serverDefault
+	flags.Lookup("actor").DefValue = ""
+	flags.Bool("json", true, "JSON output (always enabled)")
 }

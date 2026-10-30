@@ -99,6 +99,7 @@ func TestCLIJSONInputBoundsAndUTF8(t *testing.T) {
 }
 
 func TestCLIRequestsUseRealApplication(t *testing.T) {
+	t.Chdir(t.TempDir())
 	store, err := docket.Open(filepath.Join(t.TempDir(), "cli.sqlite"))
 	if err != nil {
 		t.Fatal(err)

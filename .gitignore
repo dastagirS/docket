@@ -16,3 +16,8 @@
 *.pfx
 *.log
 .DS_Store
+
+# Local CLI bindings and initialization recovery state are machine-specific.
+.docket
+.docket.lock
+.docket-write-*

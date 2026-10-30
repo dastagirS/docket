@@ -11,6 +11,7 @@ JSON writes require `Content-Type: application/json`; unknown fields, trailing J
 | GET | `/healthz` | Database connectivity |
 | GET, POST | `/api/projects` | List/create projects |
 | GET, PATCH | `/api/projects/{project}` | Read/update project |
+| GET | `/api/projects/{project}/stats` | Ticket counts: `{total, active, archived}` |
 | GET, POST | `/api/projects/{project}/tickets` | List/create tickets |
 | GET, PATCH | `/api/projects/{project}/tickets/{ticket}` | Read/update ticket |
 | GET, POST | `/api/projects/{project}/tickets/{ticket}/comments` | List/append comments |
@@ -52,6 +53,8 @@ Archiving projects or tickets never deletes records or changes their IDs/keys. A
 Project/ticket GET returns an ETag such as `"3"`. Every project PATCH, ticket PATCH, and comment POST requires the quoted current version in `If-Match`. Missing precondition: `428`; malformed precondition: `400`; stale version: `409`. A comment advances its ticket's version. Project and ticket versions are independent.
 
 Writes are transactions: a successful mutation and its event/history are committed together. Request acceptance does not give exactly-once delivery of an HTTP response. Do not blindly retry a creation after a timeout: reload to check the outcome. Creation idempotency keys are not implemented. A unique project key prevents duplicate keys, not duplicate ticket creation.
+
+Project stats count **all tickets, including subtickets**, grouped by their own archive flags. They include archived tickets and remain available for archived projects; project archival does not alter these counts. Missing projects return `404`. Counts are informational snapshots, not a version precondition. The aggregate query avoids downloading ticket pages just to display a count.
 
 ## Pagination, search, and replay
 

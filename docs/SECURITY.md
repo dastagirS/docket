@@ -41,3 +41,7 @@ Public references:
 - https://sqlite.org/cves.html
 - https://sqlite.org/releaselog/3_53_4.html
 - https://github.com/mattn/go-sqlite3/security/advisories
+
+## Local CLI bindings
+
+`.docket` supplies a default server/project, not authorization or Pi ownership. Markers are bounded regular owner-only files; symlinks and malformed metadata are rejected. Identity verification compares the project key and creation timestamp before implicit ticket requests. Pending `.docket.lock` blocks implicit scope rather than guessing or replaying an interrupted init. Keep bindings/journals local and out of source control; init never changes external integration pins. Filesystem durability is best-effort with sync/atomic rename, not a power-loss or hostile same-user process guarantee.

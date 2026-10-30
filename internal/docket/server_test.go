@@ -1183,3 +1183,34 @@ func TestSubticketMigrationFromV2AndRollback(t *testing.T) {
 		})
 	}
 }
+
+func TestProjectStatsIncludesArchivedAndSubtickets(t *testing.T) {
+	fixture := newFixture(t)
+	project := projectForTest(t, fixture, "COUNTS")
+	other := projectForTest(t, fixture, "OTHER")
+	parent := ticketForTest(t, fixture, project.ID)
+	path := fmt.Sprintf("/api/projects/%d", project.ID)
+	response := call(fixture.handler, "GET", path+"/stats", "", 0)
+	requireStatus(t, response, 200)
+	if response.Body.String() != "{\"total\":1,\"active\":1,\"archived\":0}\n" {
+		t.Fatalf("Bad initial counts: %s", response.Body.String())
+	}
+	response = call(fixture.handler, "POST", path+"/tickets", fmt.Sprintf(`{"title":"Child","parent_id":%d}`, parent.ID), 0)
+	requireStatus(t, response, 201)
+	var child Ticket
+	if err := json.Unmarshal(response.Body.Bytes(), &child); err != nil {
+		t.Fatal(err)
+	}
+	requireStatus(t, call(fixture.handler, "PATCH", fmt.Sprintf("%s/tickets/%d", path, child.ID), `{"archived":true}`, child.Version), 200)
+	response = call(fixture.handler, "GET", path+"/stats", "", 0)
+	requireStatus(t, response, 200)
+	if response.Body.String() != "{\"total\":2,\"active\":1,\"archived\":1}\n" {
+		t.Fatal("Counts must include archived children")
+	}
+	response = call(fixture.handler, "GET", fmt.Sprintf("/api/projects/%d/stats", other.ID), "", 0)
+	requireStatus(t, response, 200)
+	if response.Body.String() != "{\"total\":0,\"active\":0,\"archived\":0}\n" {
+		t.Fatal("Counts escaped project scope")
+	}
+	requireStatus(t, call(fixture.handler, "GET", "/api/projects/99999/stats", "", 0), 404)
+}

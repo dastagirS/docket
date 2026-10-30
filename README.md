@@ -33,13 +33,15 @@ docket --help
 docket --skill                     # bundled agent guide; no server connection
 docket --skill --references commands.md
 docket doctor
+docket project init  # run in your project folder; creates a local .docket binding
+docket ticket create --title 'First task'
 docket project list
 docket ticket list --project 3
 docket ticket get 12 --project 3
 docket ticket update 12 --project 3 --version 7 --status 'In Progress'
 ```
 
-The CLI is a short-lived client of the existing service, not a second database writer. Client results are JSON on stdout, diagnostics are JSON on stderr, and mutations require explicit versions. `--server` overrides `DOCKET_URL`, which otherwise defaults to `http://127.0.0.1:7331`. The CLI never starts a daemon or retries writes automatically. Use IDs/versions returned by your own reads instead of the sample values above.
+The CLI is a short-lived client of the existing service, not a second database writer. Client results are JSON on stdout, diagnostics are JSON on stderr, and mutations require explicit versions. A local `.docket` binding supplies the project/server for ticket commands (including from subfolders). Re-running init shows the ticket count and offers keep, create another, or archive-and-replace. Explicit `--project` bypasses the binding; otherwise its server stays pinned even if `DOCKET_URL` changes. Unbound commands use `--server`, then `DOCKET_URL`, then `http://127.0.0.1:7331`. The CLI never starts a daemon or retries writes automatically. Use IDs/versions returned by your own reads instead of the sample values above.
 
 A bare `docket` now prints help; use `docket serve` for server mode. Existing invocations supplying server flags remain compatible, including the current systemd/Docker commands. See [docs/CLI.md](docs/CLI.md) for all commands, stdin/files, subtickets, exit codes, and isolated testing. `BUILD_DIRECTORY` selects a separate build output when you must not replace a running service's repository binary.
 
