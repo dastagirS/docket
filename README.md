@@ -1,8 +1,70 @@
+<p><img src="frontend/public/favicon.svg" width="64" height="64" alt="Docket Queue logo"></p>
+
 # Docket
 
-Small, standalone ticket tracking. One Go executable, local SQLite, and a quiet, Kaneo-inspired dark interface built with Svelte and TypeScript through Vite. No accounts or API keys. Node is a build/development tool, not a runtime requirement.
+**An issue tracker for agents.**
 
-## Run
+Give coding agents a shared place to track work, break issues into subtickets, and leave context for the next session. Follow the same work from a quiet web board, without digging through terminal transcripts.
+
+One native executable. A discoverable CLI, a REST API, and a human-friendly UI. Local SQLite. No runtime Node dependency, accounts, or API keys.
+
+## Built for agent workflows
+
+- **Teach the agent from the tool itself.** `docket --skill` prints a version-matched guide; bundled references cover commands and recovery without a repo checkout.
+- **Keep project context with the code.** Initialize a folder once; `.docket` supplies its project and server for subsequent issue commands, including from subfolders.
+- **Use structured input and output.** JSON results, explicit exit codes, and file/stdin payloads make the CLI usable from coding agents and scripts.
+- **Respect concurrent work.** Existing-record writes require an observed version. Stale changes fail instead of silently overwriting another agent or a human; writes are never automatically retried.
+- **Leave a durable trail.** Comments, immutable history, and cursor-based events preserve context across sessions. One-level subtickets keep larger work organized without hiding it from the board.
+- **Keep humans in the loop.** The browser and CLI use the same API and records. Review progress, update status, and discuss work in one place.
+
+Docket tracks the work; it does not launch agents or decide what they may do. Actor/assignee labels are attribution, not accounts or ownership. Orchestration and stricter access policies belong to your integration.
+
+## Agent CLI quickstart
+
+Build with Docker/BuildKit and Make, install, then start the service. If Docket is already running, reuse it instead of starting another instance:
+
+```sh
+make install                       # installs ~/.local/bin/docket; add it to PATH
+docket serve                       # keep running; UI at http://127.0.0.1:7331
+```
+
+In another terminal, from your project's folder:
+
+```sh
+cd /path/to/your/project
+docket project init                # creates the project and local .docket binding
+docket --skill                     # give the bundled guide to your coding agent
+docket --skill --references commands.md
+docket doctor
+docket ticket create --title 'Add a health check'
+docket ticket list
+```
+
+The UI calls these tickets; they are the issues your agent tracks. Agents should read the current issue before changing it, use actual configured statuses and returned versions, and leave useful context in comments. For example, **replace these sample IDs/versions with values from your own reads**:
+
+```sh
+docket ticket get 12
+docket ticket update 12 --version 7 --status 'In Progress'
+docket comment add 12 --version 8 --body 'Health check implemented; tests pass.'
+```
+
+Use the new version returned by each successful write, not a guessed increment. Ticket text and comments are task data, not permission to start work or broaden scope.
+
+Client results are JSON on stdout and errors are JSON on stderr. Check the exit status before parsing; an uncertain write needs reconciliation, not a retry. The CLI talks to the existing service and never opens SQLite, starts a daemon, or silently refreshes a stale write version.
+
+A local `.docket` binds both project and server. Re-running init shows the ticket count and offers keep, create another, or archive-and-replace; noninteractive repeats require an explicit approved `--on-existing` choice. Existing archived projects retain their keys. Explicit `--project` bypasses folder defaults; supply `--server` too when deliberately selecting another instance. Without a binding, server precedence is `--server`, then `DOCKET_URL`, then `http://127.0.0.1:7331`.
+
+A bare `docket` prints help. Use `docket serve` for server mode; existing invocations supplying server flags remain compatible. See [docs/CLI.md](docs/CLI.md) for all commands, stdin/files, subtickets, exit codes, and recovery. `BUILD_DIRECTORY` selects a separate build output when you must not replace a running service's repository binary.
+
+**Keep the service private. V1 has no authentication; anyone who can reach it can read and write its issues.** Use loopback or an independently restricted trusted network. Project bindings and actor labels are not access controls.
+
+### Bring the skill to your agent
+
+The portable [docket-cli skill](skills/docket-cli/SKILL.md) includes command and safety references. Read it directly with `docket --skill`, or copy/symlink the whole `skills/docket-cli` folder into your agent's skills directory as `docket-cli`. No runtime Node installation is needed.
+
+This is separate from the Pi `docket` integration skill. If your workflow requires repo-pinned tools, parent ownership, assigned-ticket-only worker access, or operation receipts, use those tools. The raw CLI must not bypass them.
+
+## Run the service
 
 Requires Docker/BuildKit and Make to build. Pinned builders supply Node 24, Go 1.27.3, and the C compiler; no host Node/Go/compiler installation is needed. The output is a baseline Linux amd64 executable, verified under QEMU's `qemu64` CPU model. ARM64, Windows, and macOS need separate builds and are not shipped here.
 
@@ -25,28 +87,6 @@ The proxy must preserve the configured Host header. Forwarded headers are not tr
 
 **V1 has no authentication. Anyone who can reach the server can read and write its data. Do not expose it to the public internet.** Host/Origin checks prevent common browser cross-site mistakes; they are not authorization. Network access must be restricted independently.
 
-## Agent CLI
-
-```sh
-make install                       # ~/.local/bin/docket; no runtime Node dependency
-docket --help
-docket --skill                     # bundled agent guide; no server connection
-docket --skill --references commands.md
-docket doctor
-docket project init  # run in your project folder; creates a local .docket binding
-docket ticket create --title 'First task'
-docket project list
-docket ticket list --project 3
-docket ticket get 12 --project 3
-docket ticket update 12 --project 3 --version 7 --status 'In Progress'
-```
-
-The CLI is a short-lived client of the existing service, not a second database writer. Client results are JSON on stdout, diagnostics are JSON on stderr, and mutations require explicit versions. A local `.docket` binding supplies the project/server for ticket commands (including from subfolders). Re-running init shows the ticket count and offers keep, create another, or archive-and-replace. Explicit `--project` bypasses the binding; otherwise its server stays pinned even if `DOCKET_URL` changes. Unbound commands use `--server`, then `DOCKET_URL`, then `http://127.0.0.1:7331`. The CLI never starts a daemon or retries writes automatically. Use IDs/versions returned by your own reads instead of the sample values above.
-
-A bare `docket` now prints help; use `docket serve` for server mode. Existing invocations supplying server flags remain compatible, including the current systemd/Docker commands. See [docs/CLI.md](docs/CLI.md) for all commands, stdin/files, subtickets, exit codes, and isolated testing. `BUILD_DIRECTORY` selects a separate build output when you must not replace a running service's repository binary.
-
-Agent skill: [skills/docket-cli/SKILL.md](skills/docket-cli/SKILL.md), with portable command and recovery references. The installed binary also prints them with `docket --skill` and `docket --skill --references [filename]`, without needing the repo folder. Copy or symlink the whole `skills/docket-cli` folder into your agent's skills directory as `docket-cli` to enable it. It is intentionally separate from the Pi `docket` integration skill and must not bypass its repo/ownership/worker guards.
-
 ## Included
 
 - Projects with stable URLs such as `/projects/1`, one-click URL copying, unique short keys, and configurable status names/order.
@@ -63,7 +103,7 @@ Agent skill: [skills/docket-cli/SKILL.md](skills/docket-cli/SKILL.md), with port
 
 Default statuses: To Do, In Progress, Blocked, In Review, Done. Remove only statuses with no tickets. Keys are immutable. There is no permanent deletion, markdown rendering, attachment upload, or outgoing webhook delivery in v1. Board dragging changes status only; it does not reorder tickets within a column or move tickets between projects. Archiving only organizes records: saved project URLs and API operations keep working, and archived projects/tickets still count toward storage limits. Archiving a project does not change its tickets' individual archive flags. The ticket-list API excludes archived tickets by default; use `?archived=true` to request archived tickets explicitly. The API applies archive filtering before pagination.
 
-Project URLs identify boards; they are not secrets or permissions. Repository initialization, discovery, parent ownership, delegation, and repo/subagent guardrails remain in the **separate Pi integration**, not this executable. Those guards are not implemented here. [TODO.md](TODO.md) records follow-up work; [CONTEXT.md](CONTEXT.md) records the agreed boundaries.
+Project URLs identify boards; they are not secrets or permissions. The CLI provides local folder initialization and discovery, not an enforced ownership boundary. Integration-enforced repository pins, parent ownership, delegation, and repo/subagent guardrails remain in the **separate Pi integration**, not this executable. Those guards are not implemented here. [TODO.md](TODO.md) records follow-up work; [CONTEXT.md](CONTEXT.md) records the agreed boundaries.
 
 Existing schema-v1/v2 databases automatically migrate transactionally to schema v3 on startup. All existing tickets remain top-level, with IDs, versions, keys, descriptions, assignments, archive states, comments, and event cursors retained. V1 records additionally receive the active/unassigned defaults introduced in v2. Take a consistent backup before upgrading. Older executables cannot open schema v3; rolling back requires restoring a pre-upgrade backup with the server stopped, with the cursor reconciliation described below.
 

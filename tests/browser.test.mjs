@@ -1232,3 +1232,67 @@ test("form focus: white highlights, padded controls, neutral compact frames, key
     try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
   }
 });
+
+test("Queue identity: shared sidebar/favicon asset, crisp small sizes, responsive layout, and accessible home link", { timeout: 60000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-queue-logo-"));
+  const session = `docket-queue-logo-${process.pid}`;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  try {
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Logo fixture", key: "LOGO" });
+    await browser("open", `${server.origin}/projects/${project.id}`);
+    assert.match(await browser("eval", `(async () => {
+      const mark = document.querySelector('img.brand-mark');
+      if (!mark) throw new Error('Queue sidebar logo must be a vector image, not the old italic letter');
+      await mark.decode();
+      const favicon = document.querySelector('link[rel="icon"]');
+      if (!favicon || mark.currentSrc !== favicon.href) throw new Error('Sidebar and favicon must use the same canonical asset');
+      if (mark.alt !== '' || mark.getAttribute('aria-hidden') !== 'true') throw new Error('Decorative logo must not duplicate the link label');
+      const link = mark.closest('a');
+      if (link.getAttribute('aria-label') !== 'Docket home' || link.getAttribute('href') !== '/') throw new Error('Accessible home navigation changed');
+      const response = await fetch(favicon.href);
+      if (!response.ok || !response.headers.get('Content-Type').includes('image/svg+xml')) throw new Error('Bundled SVG asset was not served correctly');
+      const source = await response.text();
+      const asset = new DOMParser().parseFromString(source, 'image/svg+xml');
+      if (asset.querySelector('parsererror, text, script, style, foreignObject, image, use')) throw new Error('Logo must be self-contained geometry without fonts, scripts, or external resources');
+      for (const size of [16, 32]) {
+        const canvas = document.createElement('canvas');
+        canvas.width = size; canvas.height = size;
+        const context = canvas.getContext('2d');
+        if (!context) throw new Error('Canvas unavailable for real SVG rasterization');
+        context.drawImage(mark, 0, 0, size, size);
+        const pixel = (x, y) => [...context.getImageData(x, y, 1, 1).data];
+        const sample = size === 16 ? { x:14, bands:[3,8,13], gaps:[5,10] } : { x:27, bands:[6,16,26], gaps:[11,21] };
+        for (const y of sample.bands) {
+          const [red,green,blue,alpha] = pixel(sample.x,y);
+          if (red<230 || green<230 || blue<230 || alpha!==255) throw new Error('One of the three ticket bands disappeared at '+size+'px');
+        }
+        for (const y of sample.gaps) {
+          const [red,green,blue,alpha] = pixel(sample.x,y);
+          if (red>30 || green>30 || blue>30 || alpha!==255) throw new Error('Ticket bands merge at '+size+'px');
+        }
+      }
+      return 'PASS';
+    })()`), /PASS/);
+    for (const [width,height] of [[1440,1000],[390,844]]) {
+      await browser("set", "viewport", String(width), String(height));
+      assert.match(await browser("eval", `(() => {
+        const mark = document.querySelector('.brand-mark').getBoundingClientRect();
+        if (mark.width!==26 || mark.height!==26 || mark.left<0 || mark.right>innerWidth) throw new Error('Logo size or clipping regression');
+        if (document.documentElement.scrollWidth>innerWidth) throw new Error('Brand causes page overflow');
+        return 'PASS';
+      })()`), /PASS/);
+      if (process.env.DOCKET_SCREENSHOTS) {
+        await mkdir(process.env.DOCKET_SCREENSHOTS, { recursive: true });
+        await browser("screenshot", join(process.env.DOCKET_SCREENSHOTS, `queue-brand-${width}.png`));
+      }
+    }
+    await browser("press", "Tab");
+    assert.match(await browser("eval", "document.activeElement.matches('a.brand') && document.activeElement.matches(':focus-visible')"), /true/);
+    await browser("press", "Enter");
+    await browser("wait", "--url", server.origin + "/");
+    assert.deepEqual(await request(server.origin, `/api/projects/${project.id}`), project, "Logo navigation must not modify project data");
+  } finally {
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});

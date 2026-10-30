@@ -1,1 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#dfd9f1"/><text x="8" y="25" fill="#30283c" font-family="Georgia,serif" font-style="italic" font-size="30">d</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="#f4f4f2">
+  <title>Docket Queue</title>
+  <rect width="32" height="32" rx="4" fill="#101011"/>
+  <path d="M2 2H30V10H2V8a2 2 0 0 0 0-4V2Z"/>
+  <path d="M8 12H30V20H8V18a2 2 0 0 0 0-4V12Z"/>
+  <path d="M14 22H30V30H14V28a2 2 0 0 0 0-4V22Z"/>
+</svg>

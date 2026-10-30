@@ -35,7 +35,7 @@ button:where(:has(>.icon)){display:inline-flex;align-items:center;justify-conten
 .sidebar{width:228px;min-width:228px;display:flex;flex-direction:column;padding:26px 14px 18px;height:100%;flex-shrink:0}
 .sidebar nav{min-height:0;overflow-y:auto}
 .brand{font-size:17px;font-weight:650;letter-spacing:-.6px;display:flex;align-items:center;gap:9px;margin:0 10px 47px}
-.brand-mark{display:grid;place-items:center;background:#dfd9f1;color:#30283c;border-radius:7px;width:25px;height:25px;font:italic bold 26px Georgia,serif}
+.brand-mark{display:block;width:26px;height:26px;flex-shrink:0}
 .local-badge{font-size:9px;text-transform:uppercase;letter-spacing:.6px;font-weight:400;color:var(--muted);margin-left:auto;border:1px solid var(--border);padding:3px 4px;border-radius:4px}
 .sidebar-label{display:flex;align-items:center;justify-content:space-between;margin:0 8px 8px;font-size:10px;color:var(--muted);letter-spacing:1px}
 .project-scope{display:flex;gap:4px;margin:0 4px 10px}

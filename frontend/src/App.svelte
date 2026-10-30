@@ -244,7 +244,7 @@
 
 <svelte:window onpopstate={popstate} />
 <aside class="sidebar">
-  <a class="brand" href="/" aria-label="Docket home"><span class="brand-mark">d</span>Docket<span class="local-badge">local</span></a>
+  <a class="brand" href="/" aria-label="Docket home"><img class="brand-mark" src={`${import.meta.env.BASE_URL}favicon.svg?v=queue-1`} width="26" height="26" alt="" aria-hidden="true">docket<span class="local-badge">local</span></a>
   <div class="sidebar-label"><span>PROJECTS</span><button id="add-project" class="icon-button" aria-label="New project" onclick={() => projectDialog.open(null)}><Icon name="plus" /></button></div>
   <div class="project-scope" aria-label="Project visibility"><button id="active-projects" aria-pressed={!showArchived} onclick={() => { showArchived = false; }}>Active <span>{activeCount}</span></button><button id="archived-projects" aria-pressed={showArchived} onclick={() => { showArchived = true; }}>Archived <span>{archivedCount}</span></button></div>
   <nav id="projects" aria-label="Projects">
