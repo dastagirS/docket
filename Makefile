@@ -1,7 +1,7 @@
 BUILD_DIRECTORY ?= bin
 PREFIX ?= $(HOME)/.local
 
-.PHONY: build test test-browser frontend-build frontend-dev verify-portable vet security run test-cli install
+.PHONY: build test test-browser frontend-build frontend-dev verify-portable vet security run test-cli test-install install
 
 build:
 	docker build --platform linux/amd64 --target artifact --output type=local,dest="$(BUILD_DIRECTORY)" .
@@ -35,3 +35,6 @@ install: build
 
 run: build
 	"$(BUILD_DIRECTORY)/docket" serve
+
+test-install: build
+	DOCKET_BINARY="$(abspath $(BUILD_DIRECTORY))/docket" node --test tests/install.test.mjs

@@ -1,0 +1,99 @@
+name: Release
+
+'on':
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'dastagirS/docket'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - name: Validate stable release tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          tag_bytes_max=64
+          if [[ ${#RELEASE_TAG} -gt $tag_bytes_max || ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Release tags must be stable vMAJOR.MINOR.PATCH versions.' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Record checked-out source
+        id: source
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          commit=$(git rev-parse HEAD)
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Go tests, race detection, vet, and frontend type checks
+        run: make test
+      - name: Go vulnerability scans
+        run: make security
+      - name: Baseline CPU and SQLite portability checks
+        run: make verify-portable
+      - name: Build isolated release executable
+        run: make build BUILD_DIRECTORY="$RUNNER_TEMP/docket-build"
+      - name: Real CLI and embedded-skill checks
+        env:
+          DOCKET_BINARY: ${{ runner.temp }}/docket-build/docket
+        run: node --test tests/cli.test.mjs tests/skill.test.mjs tests/install.test.mjs
+      - name: Package release assets
+        env:
+          RELEASE_TAG: ${{ steps.source.outputs.tag }}
+        run: sh scripts/package-release.sh "$RELEASE_TAG" "$RUNNER_TEMP/docket-build/docket" "$RUNNER_TEMP/docket-release"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/docket-release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: release-assets
+          path: release-assets
+      - name: Verify artifacts and publish through a draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.build.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_commit=$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)
+          if [[ "$current_commit" != "$SOURCE_COMMIT" ]]; then
+            echo 'Release tag moved after build; refusing to publish mismatched assets.' >&2
+            exit 1
+          fi
+          cd release-assets
+          sha256sum --check SHA256SUMS
+          gh release create "$RELEASE_TAG" --verify-tag --draft --title "Docket $RELEASE_TAG" --generate-notes docket-linux-amd64 install.sh SHA256SUMS
+          gh release edit "$RELEASE_TAG" --draft=false
