@@ -1,13 +1,16 @@
-.PHONY: build test test-browser frontend-build frontend-dev verify-portable vet security run
+BUILD_DIRECTORY ?= bin
+PREFIX ?= $(HOME)/.local
+
+.PHONY: build test test-browser frontend-build frontend-dev verify-portable vet security run test-cli install
 
 build:
-	docker build --platform linux/amd64 --target artifact --output type=local,dest=bin .
+	docker build --platform linux/amd64 --target artifact --output type=local,dest="$(BUILD_DIRECTORY)" .
 
 test:
 	docker build --platform linux/amd64 --target test .
 
 test-browser: build
-	node --test tests/browser.test.mjs
+	DOCKET_BINARY="$(abspath $(BUILD_DIRECTORY))/docket" node --test tests/browser.test.mjs
 
 frontend-build:
 	npm --prefix frontend ci
@@ -24,5 +27,11 @@ vet: test
 security:
 	docker build --platform linux/amd64 --target security .
 
+test-cli: build
+	DOCKET_BINARY="$(abspath $(BUILD_DIRECTORY))/docket" node --test tests/cli.test.mjs
+
+install: build
+	install -Dm755 "$(BUILD_DIRECTORY)/docket" "$(PREFIX)/bin/docket"
+
 run: build
-	./bin/docket
+	"$(BUILD_DIRECTORY)/docket" serve

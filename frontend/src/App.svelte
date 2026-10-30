@@ -273,20 +273,24 @@
           {@const columnTickets = tickets.filter((ticket) => ticket.status === status)}
           <section class="column" class:drop-target={dropStatus === status} aria-label={status} ondragover={(event) => dragOverStatus(event, status)} ondragleave={(event) => { if (dropStatus === status && (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget))) dropStatus = null; }} ondrop={(event) => run(() => dropTicket(event, status))}>
             <div class="column-heading"><span class={`status-dot tone-${index % 5}`}></span><span>{status}</span><span class="count">{columnTickets.length}</span><button class="icon-button" aria-label={`New ticket in ${status}`} onclick={() => run(() => ticketDialog.open(project!, null, status))}><Icon name="plus" /></button></div>
-            {#each columnTickets as ticket (ticket.id)}
-              <button class="ticket-card" class:dragging={draggedTicket?.id === ticket.id} data-ticket-id={ticket.id} draggable={!ticket.archived && movingTicketID === null && !loadingProject && !loadingMore} disabled={movingTicketID === ticket.id} aria-label={`${project.key}-${ticket.id}: ${ticket.title}`} aria-describedby={ticket.assignee ? `board-drag-help card-assignee-${ticket.id}` : "board-drag-help"} ondragstart={(event) => startTicketDrag(event, ticket)} ondragend={finishTicketDrag} onclick={() => { if (!draggedTicket && movingTicketID !== ticket.id) run(() => ticketDialog.open(project!, ticket.id)); }}>
-                <div class="card-top"><span class="mono">{project.key}-{ticket.id}</span><Icon name="arrow-up-right" /></div>
-                <div class="card-title">{ticket.title}</div>
-                <div class="card-footer"><Icon name="clock" />{new Date(ticket.updated_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}{#if ticket.assignee}<span id={`card-assignee-${ticket.id}`} class="card-assignee" title={`Assigned to ${ticket.assignee}`}><Icon name="user" /><span>{ticket.assignee}</span></span>{/if}</div>
-              </button>
-            {:else}<div class="column-empty">{dropStatus === status ? "Drop ticket here" : "No tickets here"}</div>{/each}
-            {#if dropStatus === status && columnTickets.length}<div class="column-drop-hint" aria-hidden="true">Drop ticket here</div>{/if}
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex (Native scrollports need focus for keyboard scrolling; this labelled region supplies its accessible context.) -->
+            <div class="column-tickets" role="region" aria-label={`${status} tickets`} tabindex="0">
+              {#each columnTickets as ticket (ticket.id)}
+                <button class="ticket-card" class:dragging={draggedTicket?.id === ticket.id} data-ticket-id={ticket.id} draggable={!ticket.archived && movingTicketID === null && !loadingProject && !loadingMore} disabled={movingTicketID === ticket.id} aria-label={`${project.key}-${ticket.id}: ${ticket.title}`} aria-describedby={`board-drag-help${ticket.assignee ? ` card-assignee-${ticket.id}` : ""}${ticket.parent_id !== null ? ` card-parent-${ticket.id}` : ""}`} ondragstart={(event) => startTicketDrag(event, ticket)} ondragend={finishTicketDrag} onclick={() => { if (!draggedTicket && movingTicketID !== ticket.id) run(() => ticketDialog.open(project!, ticket.id)); }}>
+                  <div class="card-top"><span class="mono">{project.key}-{ticket.id}</span><Icon name="arrow-up-right" /></div>
+                  <div class="card-title">{ticket.title}</div>
+                  {#if ticket.parent_id !== null}<span id={`card-parent-${ticket.id}`} class="card-parent">Subticket of {project.key}-{ticket.parent_id}</span>{/if}
+                  <div class="card-footer"><Icon name="clock" />{new Date(ticket.updated_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}{#if ticket.assignee}<span id={`card-assignee-${ticket.id}`} class="card-assignee" title={`Assigned to ${ticket.assignee}`}><Icon name="user" /><span>{ticket.assignee}</span></span>{/if}</div>
+                </button>
+              {:else}<div class="column-empty">{dropStatus === status ? "Drop ticket here" : "No tickets here"}</div>{/each}
+              {#if dropStatus === status && columnTickets.length}<div class="column-drop-hint" aria-hidden="true">Drop ticket here</div>{/if}
+            </div>
           </section>
         {/each}
       {:else}
         <table class="list-table"><thead><tr><th>Ticket</th><th>Title</th><th class="assignee-column">Assignee</th><th>Status</th></tr></thead><tbody>
           {#each tickets as ticket (ticket.id)}
-            <tr><td class="mono muted">{project.key}-{ticket.id}</td><td><button class="list-ticket" onclick={() => run(() => ticketDialog.open(project!, ticket.id))}>{ticket.title}</button></td><td class="list-assignee">{ticket.assignee || "Unassigned"}</td><td><span class="list-status"><span class={`status-dot tone-${project.statuses.indexOf(ticket.status) % 5}`}></span>{ticket.status}</span></td></tr>
+            <tr><td class="mono muted">{project.key}-{ticket.id}</td><td><button class="list-ticket" onclick={() => run(() => ticketDialog.open(project!, ticket.id))}>{ticket.title}</button>{#if ticket.parent_id !== null}<span class="card-parent">Subticket of {project.key}-{ticket.parent_id}</span>{/if}</td><td class="list-assignee">{ticket.assignee || "Unassigned"}</td><td><span class="list-status"><span class={`status-dot tone-${project.statuses.indexOf(ticket.status) % 5}`}></span>{ticket.status}</span></td></tr>
           {/each}
         </tbody></table>
         {#if !tickets.length}<p class="empty-activity">No tickets found. Create one or try another search.</p>{/if}

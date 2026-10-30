@@ -2,13 +2,13 @@
 :root{color-scheme:dark;--base:#101011;--panel:#161617;--raised:#1d1d1f;--hover:#252528;--border:#29292c;--text:#ededee;--muted:#88888f;--accent:#a998eb;--danger:#f4a1a1;font-family:Manrope,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px;font-weight:450;font-optical-sizing:auto}
 *{box-sizing:border-box}
 #app{display:contents}
-body{margin:0;background:var(--base);color:var(--text);display:flex;min-height:100vh}
+body{margin:0;background:var(--base);color:var(--text);display:flex;height:100dvh;overflow:hidden}
 button,input,textarea,select{font:inherit;line-height:1.4}
 button,a,input,textarea,select{-webkit-tap-highlight-color:transparent}
 button{cursor:pointer;color:inherit;border:1px solid transparent;border-radius:7px;background:none;padding:7px 11px;transition:background .12s}
 button:hover{background:var(--hover)}
 button:disabled{opacity:.45;cursor:wait}
-button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+button:focus-visible,a:focus-visible,.column-tickets:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 input:focus,textarea:focus,select:focus{outline:1px solid #80749f;outline-offset:0}
 input,textarea,select{width:100%;border:1px solid var(--border);border-radius:7px;padding:10px 11px;background:#171719;color:var(--text)}
 textarea{resize:vertical;line-height:1.6}
@@ -31,7 +31,8 @@ a{color:inherit;text-decoration:none}
 button:where(:has(>.icon)){display:inline-flex;align-items:center;justify-content:center;gap:6px}
 .icon-button{line-height:1;padding:6px;color:var(--muted)}
 .card-footer .icon{width:12px;height:12px}
-.sidebar{width:228px;min-width:228px;display:flex;flex-direction:column;padding:26px 14px 18px;position:sticky;top:0;height:100vh}
+.sidebar{width:228px;min-width:228px;display:flex;flex-direction:column;padding:26px 14px 18px;height:100%;flex-shrink:0}
+.sidebar nav{min-height:0;overflow-y:auto}
 .brand{font-size:17px;font-weight:650;letter-spacing:-.6px;display:flex;align-items:center;gap:9px;margin:0 10px 47px}
 .brand-mark{display:grid;place-items:center;background:#dfd9f1;color:#30283c;border-radius:7px;width:25px;height:25px;font:italic bold 26px Georgia,serif}
 .local-badge{font-size:9px;text-transform:uppercase;letter-spacing:.6px;font-weight:400;color:var(--muted);margin-left:auto;border:1px solid var(--border);padding:3px 4px;border-radius:4px}
@@ -50,7 +51,10 @@ button:where(:has(>.icon)){display:inline-flex;align-items:center;justify-conten
 .sidebar-bottom{margin-top:auto;color:#96969d;font-size:11px;line-height:1.8;padding:25px 9px 0}
 .sidebar-bottom small{font-size:9px}
 .connection-dot{display:inline-block;width:5px;height:5px;background:#8faa92;border-radius:50%;margin-right:6px}
-main{flex:1;min-width:0;border:1px solid #232325;border-radius:13px;margin:9px 9px 9px 0;min-height:calc(100vh - 18px);overflow:hidden;background:#131314}
+main{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;border:1px solid #232325;border-radius:13px;margin:9px 9px 9px 0;overflow:hidden;background:#131314}
+.header,.toolbar,.archived-banner,.pagination{flex-shrink:0}
+/* Nested flex items must shrink below their content height so long ticket lists cannot expand the page. */
+#content{flex:1;min-height:0}
 .header{height:59px;border-bottom:1px solid var(--border);background:#171718;display:flex;align-items:center;justify-content:space-between;padding:0 24px;gap:15px}
 .breadcrumb{display:flex;align-items:center;gap:13px;min-width:0}
 .breadcrumb h1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -63,18 +67,20 @@ main{flex:1;min-width:0;border:1px solid #232325;border-radius:13px;margin:9px 9
 .toolbar-right{display:flex;align-items:center;gap:10px;margin-left:auto}
 .search-label{margin:0;display:flex;align-items:center;gap:8px;color:var(--muted);font-size:20px}
 .search-label input{border:0;background:transparent;font-size:12px;padding:6px 0;margin:0;max-width:175px;font-weight:400}
-.welcome{min-height:65vh;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:45px 20px}
+.welcome{flex:1;min-height:0;overflow-y:auto;display:flex;align-items:center;justify-content:safe center;flex-direction:column;text-align:center;padding:45px 20px}
+.welcome>*{flex-shrink:0}
 .welcome-mark{font:italic 55px Georgia,serif;color:#c5b7e8;width:72px;height:72px;background:linear-gradient(135deg,#30283e,#1c1922);border:1px solid #42374f;border-radius:19px;margin-bottom:27px;box-shadow:0 0 75px #a998eb0a}
 .welcome h2{font-size:25px;letter-spacing:-.9px}
 .welcome p{color:var(--muted);line-height:1.8;margin:14px 0 25px}
 .welcome-note{font-size:11px;color:#5f5f67;margin-top:27px}
-.board{display:flex;gap:13px;overflow-x:auto;padding:22px;min-height:calc(100vh - 180px);align-items:stretch}
-.column{flex:1;min-width:210px;max-width:380px;background:#101011;border-radius:10px;padding:10px;min-height:340px}
+.board{display:flex;gap:13px;overflow-x:auto;overflow-y:hidden;padding:22px;align-items:stretch}
+.column{flex:1;min-width:210px;max-width:380px;min-height:0;display:flex;flex-direction:column;background:#101011;border-radius:10px;padding:10px}
+.column-tickets{flex:1;min-height:0;overflow-y:auto;overscroll-behavior-y:contain;scrollbar-width:thin;scrollbar-color:#51405f transparent;scrollbar-gutter:stable}
 .column.drop-target{background:#1d1725;box-shadow:inset 0 0 0 2px #a998eb80}
 .column.drop-target .column-heading{color:#d6c7f4}
 .column.drop-target .column-empty{border-color:#85709e;color:#d0bce9;background:#a998eb08}
 .column-drop-hint{display:grid;place-items:center;min-height:64px;margin-top:8px;border:1px dashed #8d73aa;border-radius:8px;background:#a998eb0a;color:#d0bce9;font-size:11px}
-.column-heading{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:550;padding:1px 3px 14px}
+.column-heading{display:flex;flex-shrink:0;align-items:center;gap:7px;font-size:12px;font-weight:550;padding:1px 3px 14px}
 .column-heading .count{font-size:11px;color:var(--muted);font-weight:400}
 .column-heading button{margin-left:auto}
 .status-dot{width:9px;height:9px;border:1.5px solid #898991;border-radius:50%;display:inline-block;flex-shrink:0}
@@ -89,13 +95,14 @@ main{flex:1;min-width:0;border:1px solid #232325;border-radius:13px;margin:9px 9
 .ticket-card:disabled{cursor:progress}
 .card-top{display:flex;justify-content:space-between;align-items:center;color:#85858d;margin-bottom:10px}
 .card-title{font-size:13px;font-weight:500;line-height:1.55;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.card-parent{display:block;margin-top:8px;font-size:10px;color:#b5a5ce}
 .card-footer{font-size:10px;color:#6f6f77;margin-top:14px;display:flex;align-items:center;gap:5px}
 .card-assignee{display:flex;align-items:center;gap:4px;margin-left:auto;min-width:0;max-width:60%;color:#a59bae}
 .card-assignee span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .list-table .assignee-column{width:140px}
 .list-assignee{font-size:11px;color:#aaaab2}
 .column-empty{border:1px dashed #27272b;border-radius:7px;color:#515159;font-size:11px;padding:20px 8px;text-align:center}
-.list{padding:18px 22px}
+.list{padding:18px 22px;overflow:auto}
 .list-table{width:100%;border-collapse:collapse;table-layout:fixed}
 .list-table th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);font-weight:400;padding:12px 10px;border-bottom:1px solid var(--border)}
 .list-table th:first-child{width:100px}
@@ -193,6 +200,15 @@ dialog::backdrop{background:#0008;backdrop-filter:blur(3px)}
 .ticket-title:focus{outline-offset:5px}
 .status-label{display:flex;align-items:center;gap:16px;color:var(--muted);margin:0 0 27px}
 .status-label select{width:auto;min-width:145px;font-size:12px;margin:0;padding:7px 10px}
+.ticket-parent{display:flex;align-items:center;gap:10px;margin-bottom:20px;font-size:11px}
+.subtickets{border-top:1px solid var(--border);padding-top:24px;margin-top:26px}
+.subtickets .section-heading{margin-bottom:14px}
+.subtickets .section-heading h3{display:flex;align-items:center;gap:8px}
+.subtickets .section-heading button{font-size:11px}
+.subticket-visibility{width:fit-content;margin-bottom:12px}
+.subticket-row{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:12px 8px;border-bottom:1px solid var(--border);border-radius:0}
+.subticket-title{flex:1;min-width:0;overflow-wrap:anywhere;font-size:12px}
+.subticket-status{font-size:10px;color:var(--muted);max-width:30%;overflow-wrap:anywhere}
 #discussion{margin-top:30px;border-top:1px solid var(--border);padding-top:25px}
 .section-heading{margin-bottom:23px}
 .section-heading span{font-size:10px}
@@ -221,17 +237,17 @@ dialog::backdrop{background:#0008;backdrop-filter:blur(3px)}
 .board{padding:15px}
 .column{min-width:240px}
 }
-@media(max-width:600px){body{display:block}
+@media(max-width:600px){body{flex-direction:column}
 .sidebar{position:relative;width:100%;height:auto;padding:15px 14px 9px;min-width:0}
 .brand{margin:0 4px 15px;font-size:16px}
 .local-badge{margin-left:0}
 .sidebar-label{position:absolute;right:15px;top:16px;margin:0}
 .sidebar-label>span,.sidebar-bottom,.new-project-button{display:none}
-.sidebar nav{display:flex;gap:5px;overflow-x:auto}
+.sidebar nav{display:flex;gap:5px;overflow-x:auto;overflow-y:hidden;flex-shrink:0}
 .project-link{width:auto;max-width:220px;flex-shrink:0;font-size:12px;padding:7px 10px}
 .project-link .project-letter{width:16px;height:16px}
 .sidebar nav:empty{display:none}
-main{margin:4px 8px 8px;min-height:calc(100dvh - 115px);border-radius:10px}
+main{margin:4px 8px 8px;border-radius:10px}
 .header{height:auto;min-height:63px;padding:12px;flex-wrap:wrap;gap:10px}
 .breadcrumb{gap:9px}
 .breadcrumb>.muted,.breadcrumb>.slash{display:none}
@@ -243,7 +259,7 @@ main{margin:4px 8px 8px;min-height:calc(100dvh - 115px);border-radius:10px}
 .toolbar{gap:10px}
 .toolbar-right{gap:4px}
 #ticket-count{font-size:11px}
-.board{min-height:65vh;padding:12px;gap:10px}
+.board{padding:12px;gap:10px}
 .column{min-width:260px}
 .list{padding:10px}
 .list-table th:first-child{width:70px}
@@ -261,7 +277,6 @@ main{margin:4px 8px 8px;min-height:calc(100dvh - 115px);border-radius:10px}
 .settings-dialog .project-fields{grid-template-columns:minmax(0,1fr);gap:16px}
 .settings-dialog .project-fields small{font-size:10px}
 .project-lifecycle{flex-direction:column;align-items:flex-start;gap:14px;padding:16px}
-.welcome{min-height:60vh}
 .welcome h2{font-size:22px}
 .section-heading span{font-size:9px}
 }

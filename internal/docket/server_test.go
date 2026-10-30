@@ -501,7 +501,7 @@ func TestInvalidOriginsAndNewerSchema(t *testing.T) {
 			t.Fatalf("accepted invalid public URL %q", origin)
 		}
 	}
-	if _, err := fixture.store.database.Exec("PRAGMA user_version=3"); err != nil {
+	if _, err := fixture.store.database.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion+1)); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.store.Close(); err != nil {
@@ -654,8 +654,8 @@ PRAGMA user_version=1;`)
 	if err := store.database.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("schema version %d, want 2", version)
+	if version != schemaVersion {
+		t.Fatalf("schema version %d, want %d", version, schemaVersion)
 	}
 	records := make(map[string]string)
 	for _, route := range []string{"/api/projects/1/tickets/1", "/api/projects/1/tickets/1/comments", "/api/projects/1/tickets/1/history"} {
@@ -992,4 +992,194 @@ func TestTicketListsExcludeArchivesByDefault(t *testing.T) {
 		}
 	}
 	requireStatus(t, call(fixture.handler, "GET", base+"?archived=all", "", 0), 400)
+}
+
+func TestSubticketsStayFlatAndProjectScoped(t *testing.T) {
+	fixture := newFixture(t)
+	project := projectForTest(t, fixture, "FAMILY")
+	other := projectForTest(t, fixture, "OTHER")
+	parent := ticketForTest(t, fixture, project.ID)
+	collection := fmt.Sprintf("/api/projects/%d/tickets", project.ID)
+	parentPath := fmt.Sprintf("%s/%d", collection, parent.ID)
+	before := call(fixture.handler, "GET", parentPath, "", 0).Body.String()
+	if !strings.Contains(before, `"parent_id":null`) {
+		t.Fatal("Root tickets must expose a null parent")
+	}
+	response := call(fixture.handler, "POST", collection, fmt.Sprintf(`{"title":"First child","parent_id":%d,"assignee":"Morgan"}`, parent.ID), 0)
+	requireStatus(t, response, 201)
+	var child struct {
+		ID       int64  `json:"id"`
+		Version  int64  `json:"version"`
+		ParentID *int64 `json:"parent_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &child); err != nil {
+		t.Fatal(err)
+	}
+	if child.ParentID == nil || *child.ParentID != parent.ID || child.ID == parent.ID || child.Version != 1 {
+		t.Fatalf("invalid subticket: %s", response.Body.String())
+	}
+	for _, body := range []string{`{"title":"Second child"}`, `{"title":"Third child"}`} {
+		body = strings.TrimSuffix(body, "}") + fmt.Sprintf(`,"parent_id":%d}`, parent.ID)
+		requireStatus(t, call(fixture.handler, "POST", collection, body, 0), 201)
+	}
+	requireStatus(t, call(fixture.handler, "POST", collection, fmt.Sprintf(`{"title":"Too deep","parent_id":%d}`, child.ID), 0), 400)
+	requireStatus(t, call(fixture.handler, "POST", fmt.Sprintf("/api/projects/%d/tickets", other.ID), fmt.Sprintf(`{"title":"Wrong board","parent_id":%d}`, parent.ID), 0), 404)
+	for _, value := range []string{"0", "-1", `"1"`, "1.5", "true", "{}"} {
+		requireStatus(t, call(fixture.handler, "POST", collection, `{"title":"Invalid parent","parent_id":`+value+`}`, 0), 400)
+	}
+	childPath := fmt.Sprintf("%s/%d", collection, child.ID)
+	for _, value := range []string{"null", fmt.Sprint(parent.ID)} {
+		requireStatus(t, call(fixture.handler, "PATCH", childPath, `{"title":"Do not change","parent_id":`+value+`}`, child.Version), 400)
+	}
+	response = call(fixture.handler, "GET", collection, "", 0)
+	requireStatus(t, response, 200)
+	var page struct {
+		Items      []Ticket `json:"items"`
+		NextCursor int64    `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 4 {
+		t.Fatalf("Main board must include parent and all children: %s", response.Body.String())
+	}
+	filter := fmt.Sprintf("%s?parent_id=%d&limit=1", collection, parent.ID)
+	response = call(fixture.handler, "GET", filter, "", 0)
+	requireStatus(t, response, 200)
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ID != child.ID {
+		t.Fatal("Parent filter must apply before pagination")
+	}
+	requireStatus(t, call(fixture.handler, "PATCH", childPath, `{"archived":true,"status":"Done"}`, child.Version), 200)
+	requireStatus(t, call(fixture.handler, "PATCH", childPath, `{"status":"To Do"}`, child.Version), 409)
+	if got := call(fixture.handler, "GET", parentPath, "", 0).Body.String(); got != before {
+		t.Fatal("Creating or editing children changed the parent")
+	}
+	response = call(fixture.handler, "GET", filter+"&archived=true", "", 0)
+	requireStatus(t, response, 200)
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ID != child.ID {
+		t.Fatal("Archived children must remain queryable")
+	}
+	for _, value := range []string{"", "0", "-1", "bad", "1.5", fmt.Sprintf("%d&parent_id=%d", parent.ID, parent.ID)} {
+		requireStatus(t, call(fixture.handler, "GET", collection+"?parent_id="+value, "", 0), 400)
+	}
+	requireStatus(t, call(fixture.handler, "GET", fmt.Sprintf("/api/projects/%d/tickets?parent_id=%d", other.ID, parent.ID), "", 0), 404)
+	requireStatus(t, call(fixture.handler, "PATCH", parentPath, `{"archived":true}`, parent.Version), 200)
+	response = call(fixture.handler, "GET", fmt.Sprintf("%s?parent_id=%d", collection, parent.ID), "", 0)
+	requireStatus(t, response, 200)
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatal("Archiving parent must not archive its remaining children")
+	}
+	response = call(fixture.handler, "GET", childPath+"/history", "", 0)
+	requireStatus(t, response, 200)
+	if !strings.Contains(response.Body.String(), fmt.Sprintf(`"parent_id":%d`, parent.ID)) {
+		t.Fatal("Child history lost its parent reference")
+	}
+}
+
+func TestSubticketMigrationFromV2AndRollback(t *testing.T) {
+	for _, obstructed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("obstructed=%t", obstructed), func(t *testing.T) {
+			fixture := newFixture(t)
+			project := projectForTest(t, fixture, "UPGRADE")
+			ticket := ticketForTest(t, fixture, project.ID)
+			path := fmt.Sprintf("/api/projects/%d/tickets/%d", project.ID, ticket.ID)
+			requireStatus(t, call(fixture.handler, "PATCH", path, `{"assignee":"Preserved owner","archived":true}`, ticket.Version), 200)
+			before := call(fixture.handler, "GET", path, "", 0).Body.String()
+			history := call(fixture.handler, "GET", path+"/history", "", 0).Body.String()
+			if _, err := fixture.store.database.Exec("DROP INDEX tickets_parent; ALTER TABLE tickets DROP COLUMN parent_id; PRAGMA user_version=2;"); err != nil {
+				t.Fatal(err)
+			}
+			if obstructed {
+				if _, err := fixture.store.database.Exec("CREATE INDEX tickets_parent ON tickets(id)"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := fixture.store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store, err := Open(fixture.path)
+			if obstructed {
+				if err == nil {
+					if closeError := store.Close(); closeError != nil {
+						t.Error(closeError)
+					}
+					t.Fatal("Obstructed migration unexpectedly succeeded")
+				}
+				database, err := sql.Open("sqlite3", fixture.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					if err := database.Close(); err != nil {
+						t.Error(err)
+					}
+				}()
+				var version, columns int
+				if err := database.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.QueryRow("SELECT COUNT(*) FROM pragma_table_info('tickets') WHERE name='parent_id'").Scan(&columns); err != nil {
+					t.Fatal(err)
+				}
+				if version != 2 || columns != 0 {
+					t.Fatal("Failed migration left a partial schema")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := store.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			handler, err := NewServer(store, "http://docket.test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response := call(handler, "GET", path, "", 0); response.Code != 200 || response.Body.String() != before {
+				t.Fatal("Migration changed existing ticket fields or version")
+			}
+			if response := call(handler, "GET", path+"/history", "", 0); response.Code != 200 || response.Body.String() != history {
+				t.Fatal("Migration rewrote history or event cursors")
+			}
+			response := call(handler, "POST", fmt.Sprintf("/api/projects/%d/tickets", project.ID), fmt.Sprintf(`{"title":"Preserve this relationship","parent_id":%d}`, ticket.ID), 0)
+			requireStatus(t, response, 201)
+			var child Ticket
+			if err := json.Unmarshal(response.Body.Bytes(), &child); err != nil {
+				t.Fatal(err)
+			}
+			backup := filepath.Join(t.TempDir(), "subticket-backup.sqlite")
+			if err := store.Backup(context.Background(), backup); err != nil {
+				t.Fatal(err)
+			}
+			restored, err := Open(backup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := restored.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			kept, err := readTicket(restored.database.QueryRow("SELECT "+ticketColumns+" FROM tickets WHERE id=?", child.ID))
+			if err != nil || kept.ParentID == nil || *kept.ParentID != ticket.ID {
+				t.Fatalf("Backup lost relationship: %v", err)
+			}
+			var integrity string
+			if err := restored.database.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil || integrity != "ok" {
+				t.Fatalf("Backup integrity: %q, %v", integrity, err)
+			}
+		})
+	}
 }

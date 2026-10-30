@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -17,20 +19,32 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
-		slog.Error("docket stopped", "error", err)
-		os.Exit(1)
-	}
+	// Go otherwise exits on a broken stdout pipe before we can report a possibly committed write.
+	signal.Ignore(syscall.SIGPIPE)
+	os.Exit(execute(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-func run() (result error) {
+func serve(arguments []string, output io.Writer) (result error) {
+	flags := flag.NewFlagSet("docket serve", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.Usage = func() {}
 	const shutdownTimeout = 10 * time.Second
-	listenAddress := flag.String("listen", "127.0.0.1:7331", "HTTP listen address; loopback by default")
-	databasePath := flag.String("database", "data/docket.sqlite", "SQLite file on local persistent storage")
-	publicURL := flag.String("public-url", "", "browser origin, required for non-loopback listeners (no subpath)")
-	backupPath := flag.String("backup-to", "", "write a consistent backup to a new file and exit")
-	flag.Parse()
-	if flag.NArg() != 0 {
+	listenAddress := flags.String("listen", "127.0.0.1:7331", "HTTP listen address; loopback by default")
+	databasePath := flags.String("database", "data/docket.sqlite", "SQLite file on local persistent storage")
+	publicURL := flags.String("public-url", "", "browser origin, required for non-loopback listeners (no subpath)")
+	backupPath := flags.String("backup-to", "", "write a consistent backup to a new file and exit")
+	if err := flags.Parse(arguments); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			var help bytes.Buffer
+			help.WriteString("Usage: docket serve [options]\n\n")
+			flags.SetOutput(&help)
+			flags.PrintDefaults()
+			_, err := output.Write(help.Bytes())
+			return err
+		}
+		return errors.New("Invalid server flags; use docket serve --help")
+	}
+	if flags.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
 	}
 	store, err := docket.Open(*databasePath)

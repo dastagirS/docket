@@ -12,9 +12,10 @@ const execute = promisify(execFile);
 const commandTimeoutMs = 60000;
 const requestTimeoutMs = 5000;
 const outputBytesMax = 1048576;
+const binary = resolve(process.env.DOCKET_BINARY ?? "bin/docket");
 
 async function startServer(database) {
-  const child = spawn(resolve("bin/docket"), ["--database", database, "--listen", "127.0.0.1:0"], { stdio: ["ignore", "ignore", "pipe"] });
+  const child = spawn(binary, ["--database", database, "--listen", "127.0.0.1:0"], { stdio: ["ignore", "ignore", "pipe"] });
   let output = "";
   let failure;
   child.on("error", (error) => { failure = error; });
@@ -210,7 +211,7 @@ test("real process: replay survives SIGKILL and a consistent backup", { timeout:
     await stopServer(server, "SIGKILL");
     server = await startServer(database);
     assert.deepEqual(await request(server.origin, feed), expected);
-    await execute(resolve("bin/docket"), ["--database", database, "--backup-to", backup], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax });
+    await execute(binary, ["--database", database, "--backup-to", backup], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax });
     await stopServer(server);
     server = await startServer(backup);
     assert.deepEqual(await request(server.origin, feed), expected);
@@ -958,6 +959,164 @@ test("board drag safety: frozen versions, live polling, offline recovery, and na
   } finally {
     nativeDrag?.close();
     await browser("mouse", "up").catch(() => console.error("Disposable drag pointer cleanup unavailable"));
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("board scrolling: fixed shell, independent columns, short screens, list scrolling, and drag after scroll", { timeout: 60000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-board-scroll-"));
+  const session = `docket-scroll-${process.pid}`;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  try {
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Scrollable board", key: "SCROLL", statuses: ["Queue", "Building", "Review", "Verify", "Done"] });
+    const ticketCount = 26;
+    for (let i = 0; i < ticketCount; i++) {
+      await request(server.origin, `/api/projects/${project.id}/tickets`, "POST", { title: `Ticket ${i + 1}: keep long boards within the available screen space`, status: i < 18 ? "Queue" : "Building" });
+    }
+    await browser("set", "viewport", "1440", "900");
+    await browser("open", `${server.origin}/projects/${project.id}`);
+    await browser("wait", "--fn", `document.querySelectorAll('.ticket-card').length === ${ticketCount} && document.getElementById('content').getAttribute('aria-busy') === 'false'`);
+    assert.match(await browser("eval", `(() => {
+      if (document.scrollingElement.scrollHeight > innerHeight + 1) throw new Error('Tall ticket columns must not grow the document beyond the viewport');
+      return 'PASS';
+    })()`), /PASS/);
+    const viewports = [[1440, 900], [850, 700], [390, 844], [390, 600]];
+    for (const [width, height] of viewports) {
+      await browser("set", "viewport", String(width), String(height));
+      assert.match(await browser("eval", `(() => {
+        const root = document.scrollingElement;
+        const board = document.getElementById('content');
+        const source = document.querySelector('.column[aria-label="Queue"] .column-tickets');
+        const target = document.querySelector('.column[aria-label="Building"] .column-tickets');
+        if (root.scrollHeight > innerHeight + 1 || root.scrollWidth > innerWidth + 1) throw new Error('Page overflow at ${width}x${height}');
+        if (source.clientHeight <= 0 || source.scrollHeight <= source.clientHeight) throw new Error('Ticket column must have a bounded scroll area');
+        if (board.getBoundingClientRect().bottom > innerHeight) throw new Error('Board extends below screen');
+        source.scrollTop = 0; target.scrollTop = 0; board.scrollLeft = 0;
+        window.scrollHeaderTop = document.querySelector('.header').getBoundingClientRect().top;
+        window.scrollHeadingTop = document.querySelector('.column-heading').getBoundingClientRect().top;
+        return 'PASS';
+      })()`), /PASS/);
+      await browser("scroll", "down", "500", "--selector", '.column[aria-label="Queue"] .column-tickets');
+      await browser("wait", "--fn", "document.querySelector('.column[aria-label=\"Queue\"] .column-tickets').scrollTop > 0");
+      assert.match(await browser("eval", `(() => {
+        if (document.scrollingElement.scrollTop !== 0) throw new Error('Column scrolling moved the page');
+        if (document.querySelector('.column[aria-label="Building"] .column-tickets').scrollTop !== 0) throw new Error('Neighbor column scrolled with source');
+        if (document.querySelector('.header').getBoundingClientRect().top !== window.scrollHeaderTop || document.querySelector('.column-heading').getBoundingClientRect().top !== window.scrollHeadingTop) throw new Error('Page or status heading moved');
+        const source = document.querySelector('.column[aria-label="Queue"] .column-tickets');
+        source.focus();
+        return 'PASS';
+      })()`), /PASS/);
+      await browser("press", "End");
+      await browser("wait", "--fn", "(() => { const source = document.querySelector('.column[aria-label=\"Queue\"] .column-tickets'); return source.lastElementChild.getBoundingClientRect().bottom <= source.getBoundingClientRect().bottom + 1; })()");
+      assert.match(await browser("eval", `(() => {
+        const board = document.getElementById('content');
+        if (board.scrollWidth > board.clientWidth) {
+          board.scrollLeft = board.scrollWidth;
+          const last = document.querySelector('.column[aria-label="Done"]').getBoundingClientRect();
+          if (last.right > board.getBoundingClientRect().right + 1 || last.left < board.getBoundingClientRect().left) throw new Error('Last status column is unreachable');
+        }
+        if (document.scrollingElement.scrollTop !== 0 || document.scrollingElement.scrollLeft !== 0) throw new Error('Keyboard or horizontal scrolling moved the document');
+        board.scrollLeft = 0;
+        document.querySelector('.column[aria-label="Queue"] .column-tickets').scrollTop = 0;
+        return 'PASS';
+      })()`), /PASS/);
+      if (process.env.DOCKET_SCREENSHOTS) {
+        await mkdir(process.env.DOCKET_SCREENSHOTS, { recursive: true });
+        await browser("screenshot", join(process.env.DOCKET_SCREENSHOTS, `board-scroll-${width}-${height}.png`));
+      }
+    }
+    await browser("set", "viewport", "1440", "900");
+    await browser("eval", "window.scrollHeaderTop = document.querySelector('.header').getBoundingClientRect().top; true");
+    await browser("scroll", "down", "400", "--selector", '.column[aria-label="Queue"] .column-tickets');
+    const visible = JSON.parse(await browser("eval", `(() => {
+      const source = document.querySelector('.column[aria-label="Queue"] .column-tickets');
+      const bounds = source.getBoundingClientRect();
+      const card = [...source.querySelectorAll('.ticket-card')].find(element => { const position = element.getBoundingClientRect(); return position.top >= bounds.top && position.bottom <= bounds.bottom; });
+      if (!card) throw new Error('No fully visible card after scrolling');
+      return Number(card.dataset.ticketId);
+    })()`, "--json"));
+    assert.equal(visible.success, true);
+    assert.ok(Number.isSafeInteger(visible.data.result) && visible.data.result > 0);
+    await browser("drag", `[data-ticket-id="${visible.data.result}"]`, '.column[aria-label="Review"]');
+    await browser("wait", "--fn", "document.querySelector('.column[aria-label=\"Review\"] .ticket-card') !== null && document.getElementById('content').getAttribute('aria-busy') === 'false'");
+    assert.equal((await request(server.origin, `/api/projects/${project.id}/tickets/${visible.data.result}`)).status, "Review");
+    assert.match(await browser("eval", "document.querySelector('.column[aria-label=\"Queue\"] .column-tickets').scrollTop > 0 && document.scrollingElement.scrollTop === 0"), /true/);
+    await browser("click", "#list-view");
+    await browser("scroll", "down", "500", "--selector", "#content");
+    await browser("wait", "--fn", "document.getElementById('content').scrollTop > 0");
+    assert.match(await browser("eval", "document.scrollingElement.scrollTop === 0 && document.querySelector('.header').getBoundingClientRect().top === window.scrollHeaderTop"), /true/);
+  } finally {
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("subtickets: one level, main-board visibility, parent navigation, live children, and independent archiving", { timeout: 60000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-subtickets-"));
+  const session = `docket-subtickets-${process.pid}`;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  try {
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Subticket board", key: "TREE" });
+    const parent = await request(server.origin, `/api/projects/${project.id}/tickets`, "POST", { title: "Ship the feature", description: "Parent context", assignee: "Owner" });
+    const parentPath = `/api/projects/${project.id}/tickets/${parent.id}`;
+    await browser("set", "viewport", "1440", "1000");
+    await browser("open", `${server.origin}/projects/${project.id}`);
+    await browser("wait", ".ticket-card");
+    await browser("click", `[data-ticket-id="${parent.id}"]`);
+    await browser("click", "#add-subticket");
+    await browser("wait", "#ticket-parent");
+    assert.match(await browser("eval", "document.getElementById('ticket-parent').textContent"), new RegExp(`TREE-${parent.id}`));
+    await browser("fill", "#ticket-title", "Implement the detail");
+    await browser("fill", "#ticket-assignee", "Morgan");
+    await browser("click", "#save-ticket");
+    await browser("wait", "--fn", "!document.getElementById('ticket-dialog').open && document.querySelectorAll('.ticket-card').length === 2");
+    const page = await request(server.origin, `/api/projects/${project.id}/tickets?parent_id=${parent.id}`);
+    assert.equal(page.items.length, 1);
+    const child = page.items[0];
+    assert.equal(child.parent_id, parent.id);
+    assert.equal(child.assignee, "Morgan");
+    assert.deepEqual(await request(server.origin, parentPath), parent, "Creating a subticket must not rewrite its parent");
+    assert.match(await browser("eval", `document.querySelector('[data-ticket-id="${child.id}"] .card-parent').textContent`), new RegExp(`TREE-${parent.id}`));
+    await browser("drag", `[data-ticket-id="${child.id}"]`, '.column[aria-label="In Progress"]');
+    await browser("wait", "--fn", `document.querySelector('.column[aria-label="In Progress"] [data-ticket-id="${child.id}"]') !== null && document.getElementById('content').getAttribute('aria-busy') === 'false'`);
+    const moved = await request(server.origin, `/api/projects/${project.id}/tickets/${child.id}`);
+    assert.equal(moved.status, "In Progress");
+    assert.equal(moved.parent_id, parent.id);
+    assert.deepEqual(await request(server.origin, parentPath), parent);
+    await browser("click", "#list-view");
+    assert.match(await browser("eval", "document.querySelector('.list-table .card-parent').textContent"), new RegExp(`TREE-${parent.id}`));
+    await browser("click", "#board-view");
+    await browser("click", `[data-ticket-id="${child.id}"]`);
+    assert.match(await browser("eval", "document.getElementById('add-subticket') === null && document.getElementById('ticket-parent') !== null"), /true/);
+    await browser("click", "#ticket-parent");
+    await browser("wait", "--fn", `document.getElementById('ticket-reference').textContent === 'TREE-${parent.id}' && document.querySelectorAll('.subticket-row').length === 1`);
+    await browser("fill", "#ticket-description", "Keep this unsaved parent draft");
+    await browser("fill", "#comment-body", "Keep this unsent parent comment");
+    const second = await request(server.origin, `/api/projects/${project.id}/tickets`, "POST", { title: "Another independent detail", parent_id: parent.id });
+    await browser("wait", "--fn", "document.querySelectorAll('.subticket-row').length === 2");
+    assert.match(await browser("eval", "document.getElementById('ticket-description').value === 'Keep this unsaved parent draft' && document.getElementById('comment-body').value === 'Keep this unsent parent comment'"), /true/);
+    await browser("fill", "#ticket-description", parent.description);
+    await browser("fill", "#comment-body", "");
+    await browser("click", "#save-ticket");
+    await browser("wait", "--fn", "!document.getElementById('save-ticket').disabled");
+    await request(server.origin, `/api/projects/${project.id}/tickets/${child.id}`, "PATCH", { archived: true }, moved.version);
+    await browser("wait", "--fn", `document.querySelectorAll('.subticket-row').length === 1 && document.querySelector('.subticket-row').dataset.subticketId === '${second.id}'`);
+    await browser("click", "#archived-subtickets");
+    await browser("wait", "--fn", `document.querySelector('.subticket-row')?.dataset.subticketId === '${child.id}'`);
+    assert.match(await browser("eval", "document.querySelector('.subticket-row').textContent"), /Archived/);
+    if (process.env.DOCKET_SCREENSHOTS) {
+      await mkdir(process.env.DOCKET_SCREENSHOTS, { recursive: true });
+      await browser("screenshot", join(process.env.DOCKET_SCREENSHOTS, "subtickets-desktop.png"));
+      await browser("set", "viewport", "390", "844");
+      await browser("eval", "document.getElementById('subtickets').scrollIntoView(); true");
+      await browser("screenshot", join(process.env.DOCKET_SCREENSHOTS, "subtickets-phone.png"));
+      assert.match(await browser("eval", "document.getElementById('ticket-dialog').scrollWidth <= document.getElementById('ticket-dialog').clientWidth"), /true/);
+    }
+    await browser("click", ".subticket-row");
+    await browser("wait", "--fn", `document.getElementById('ticket-reference').textContent === 'TREE-${child.id}'`);
+    assert.match(await browser("eval", "!document.getElementById('ticket-archived-banner').hidden && document.getElementById('add-subticket') === null"), /true/);
+  } finally {
     try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
   }
 });

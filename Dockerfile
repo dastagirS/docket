@@ -15,6 +15,7 @@ COPY go.mod go.sum ./
 RUN go mod download && go mod verify
 COPY cmd/ cmd/
 COPY internal/ internal/
+COPY skills/ skills/
 COPY --from=frontend /internal/docket/web/ internal/docket/web/
 
 FROM toolchain AS test

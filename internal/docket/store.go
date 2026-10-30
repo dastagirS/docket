@@ -30,7 +30,7 @@ const (
 	AssigneeBytesMax = 100
 	databasePagesMax = 131072 // 512 MiB at the required 4096-byte page size; never silently discard history.
 	queryTimeout     = 5 * time.Second
-	schemaVersion    = 2
+	schemaVersion    = 3
 )
 
 var defaultStatuses = []string{"To Do", "In Progress", "Blocked", "In Review", "Done"}
@@ -56,6 +56,7 @@ type Ticket struct {
 	UpdatedAt   string `json:"updated_at"`
 	Archived    bool   `json:"archived"`
 	Assignee    string `json:"assignee"`
+	ParentID    *int64 `json:"parent_id"`
 }
 
 type Comment struct {
@@ -166,6 +167,15 @@ ALTER TABLE tickets ADD COLUMN assignee TEXT NOT NULL DEFAULT '';
 PRAGMA user_version=2;`); err != nil {
 			return err
 		}
+		version = 2
+	}
+	if version == 2 {
+		if _, err := transaction.ExecContext(ctx, `
+ALTER TABLE tickets ADD COLUMN parent_id INTEGER REFERENCES tickets(id) CHECK(parent_id > 0 AND parent_id <> id);
+CREATE INDEX tickets_parent ON tickets(project_id,parent_id,id);
+PRAGMA user_version=3;`); err != nil {
+			return err
+		}
 		return transaction.Commit()
 	}
 	_, err = transaction.ExecContext(ctx, `
@@ -188,9 +198,11 @@ CREATE TABLE tickets (
  created_at TEXT NOT NULL,
  updated_at TEXT NOT NULL,
  archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)),
- assignee TEXT NOT NULL DEFAULT ''
+ assignee TEXT NOT NULL DEFAULT '',
+ parent_id INTEGER REFERENCES tickets(id) CHECK(parent_id > 0 AND parent_id <> id)
 );
 CREATE INDEX tickets_project ON tickets(project_id, id);
+CREATE INDEX tickets_parent ON tickets(project_id,parent_id,id);
 CREATE TABLE comments (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  ticket_id INTEGER NOT NULL REFERENCES tickets(id),
@@ -210,7 +222,7 @@ CREATE TABLE events (
 );
 CREATE INDEX events_project ON events(project_id, id);
 CREATE INDEX events_ticket ON events(ticket_id, id);
-PRAGMA user_version=2;`)
+PRAGMA user_version=3;`)
 	if err != nil {
 		return err
 	}
@@ -287,7 +299,7 @@ func readProject(row rowReader) (Project, error) {
 
 func readTicket(row rowReader) (Ticket, error) {
 	var ticket Ticket
-	err := row.Scan(&ticket.ID, &ticket.ProjectID, &ticket.Title, &ticket.Description, &ticket.Status, &ticket.Version, &ticket.CreatedAt, &ticket.UpdatedAt, &ticket.Archived, &ticket.Assignee)
+	err := row.Scan(&ticket.ID, &ticket.ProjectID, &ticket.Title, &ticket.Description, &ticket.Status, &ticket.Version, &ticket.CreatedAt, &ticket.UpdatedAt, &ticket.Archived, &ticket.Assignee, &ticket.ParentID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ticket, notFound
 	}
@@ -295,7 +307,7 @@ func readTicket(row rowReader) (Ticket, error) {
 }
 
 const projectColumns = "id,name,key,statuses,version,created_at,archived"
-const ticketColumns = "id,project_id,title,description,status,version,created_at,updated_at,archived,assignee"
+const ticketColumns = "id,project_id,title,description,status,version,created_at,updated_at,archived,assignee,parent_id"
 
 func validText(value string, maximum int, required bool) bool {
 	return utf8.ValidString(value) && len(value) <= maximum && !strings.ContainsRune(value, 0) && (!required || strings.TrimSpace(value) != "")

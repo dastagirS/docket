@@ -8,7 +8,7 @@ Requires Docker/BuildKit and Make to build. Pinned builders supply Node 24, Go 1
 
 ```sh
 make build
-./bin/docket
+./bin/docket serve
 # Open http://127.0.0.1:7331
 ```
 
@@ -17,7 +17,7 @@ make build
 For a trusted private network or reverse proxy, explicitly set the listener and browser origin:
 
 ```sh
-./bin/docket --listen 0.0.0.0:7331 --public-url http://your-private-server:7331
+./bin/docket serve --listen 0.0.0.0:7331 --public-url http://your-private-server:7331
 # For an HTTPS reverse proxy: --public-url https://your-private-host
 ```
 
@@ -25,13 +25,34 @@ The proxy must preserve the configured Host header. Forwarded headers are not tr
 
 **V1 has no authentication. Anyone who can reach the server can read and write its data. Do not expose it to the public internet.** Host/Origin checks prevent common browser cross-site mistakes; they are not authorization. Network access must be restricted independently.
 
+## Agent CLI
+
+```sh
+make install                       # ~/.local/bin/docket; no runtime Node dependency
+docket --help
+docket --skill                     # bundled agent guide; no server connection
+docket --skill --references commands.md
+docket doctor
+docket project list
+docket ticket list --project 3
+docket ticket get 12 --project 3
+docket ticket update 12 --project 3 --version 7 --status 'In Progress'
+```
+
+The CLI is a short-lived client of the existing service, not a second database writer. Client results are JSON on stdout, diagnostics are JSON on stderr, and mutations require explicit versions. `--server` overrides `DOCKET_URL`, which otherwise defaults to `http://127.0.0.1:7331`. The CLI never starts a daemon or retries writes automatically. Use IDs/versions returned by your own reads instead of the sample values above.
+
+A bare `docket` now prints help; use `docket serve` for server mode. Existing invocations supplying server flags remain compatible, including the current systemd/Docker commands. See [docs/CLI.md](docs/CLI.md) for all commands, stdin/files, subtickets, exit codes, and isolated testing. `BUILD_DIRECTORY` selects a separate build output when you must not replace a running service's repository binary.
+
+Agent skill: [skills/docket-cli/SKILL.md](skills/docket-cli/SKILL.md), with portable command and recovery references. The installed binary also prints them with `docket --skill` and `docket --skill --references [filename]`, without needing the repo folder. Copy or symlink the whole `skills/docket-cli` folder into your agent's skills directory as `docket-cli` to enable it. It is intentionally separate from the Pi `docket` integration skill and must not bypass its repo/ownership/worker guards.
+
 ## Included
 
 - Projects with stable URLs such as `/projects/1`, one-click URL copying, unique short keys, and configurable status names/order.
 - Reversible project and ticket archiving with separate active/archived views; no tickets, comments, or history are deleted. Open the gear icon for project settings, where **Delete project** explains that the project is moved to Archived; archived projects offer **Restore project** there.
+- One-level subtickets: create them from a parent ticket; they remain ordinary board/list items with their own status, assignee, discussion, and archive state. Parent links are fixed at creation.
 - Optional free-text ticket assignees, shown on cards and in lists; no accounts or user directory required.
 - Automatic updates about every three seconds while the tab is visible, preserving search, loaded pages, and unsaved ticket/comment drafts.
-- Board and list views, title search, responsive ticket detail panel.
+- Board and list views, title search, responsive ticket detail panel. Each status column scrolls independently beneath its fixed heading; the page header and toolbar stay visible.
 - Desktop board drag-and-drop between status columns, saved through the version-checked API. Open the ticket's Status selector for keyboard/touch use.
 - Ticket descriptions and comments as plain text, status changes, permanent attributed history.
 - Version-checked ticket/project edits and comments; stale writes return `409`, not silent overwrites.
@@ -42,7 +63,7 @@ Default statuses: To Do, In Progress, Blocked, In Review, Done. Remove only stat
 
 Project URLs identify boards; they are not secrets or permissions. Repository initialization, discovery, parent ownership, delegation, and repo/subagent guardrails remain in the **separate Pi integration**, not this executable. Those guards are not implemented here. [TODO.md](TODO.md) records follow-up work; [CONTEXT.md](CONTEXT.md) records the agreed boundaries.
 
-Existing schema-v1 databases automatically migrate to schema v2 on startup. Existing projects and tickets start active, and existing tickets start unassigned; IDs, keys, descriptions, comments, and event cursors are retained. Take a consistent backup before upgrading. Older executables cannot open schema v2; rolling back requires restoring a pre-upgrade backup with the server stopped, with the cursor reconciliation described below.
+Existing schema-v1/v2 databases automatically migrate transactionally to schema v3 on startup. All existing tickets remain top-level, with IDs, versions, keys, descriptions, assignments, archive states, comments, and event cursors retained. V1 records additionally receive the active/unassigned defaults introduced in v2. Take a consistent backup before upgrading. Older executables cannot open schema v3; rolling back requires restoring a pre-upgrade backup with the server stopped, with the cursor reconciliation described below.
 
 Live updates use bounded polling of the durable event feed, not WebSockets or a permanent connection. Hidden tabs pause polling. Open tickets update automatically unless there are unsaved ticket edits; those edits are kept and a reload/conflict warning is shown instead. An unsent comment is preserved. Each visible tab consumes requests under the instance-wide rate limit, and the UI's existing record-display limits still apply. Polling pauses during a board drag or pending drop so the ticket's original version cannot be silently refreshed mid-gesture. Drops use that version in `If-Match`; failures show an error and reconcile with the API rather than leaving a client-only move. Archived tickets are not draggable, and a same-column or cancelled drag does not write history. Native desktop dragging is verified in Chromium; touch dragging and other browser engines are not certified.
 
@@ -99,6 +120,7 @@ See [docs/API.md](docs/API.md) for request examples, versions, events, and limit
 ```sh
 make test                       # isolated Go tests with race detector + vet
 make verify-portable            # SQLite backup + API tests under baseline CPU emulation
+make test-cli                   # isolated CLI process checks; existing Node required
 make test-browser               # optional: existing Node + agent-browser/Chromium required
 make security                   # pinned scanner: module, package, and final binary checks
 ```

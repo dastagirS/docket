@@ -27,6 +27,7 @@ export interface Ticket {
   updated_at: string;
   archived: boolean;
   assignee: string;
+  parent_id: number | null;
 }
 export interface Comment {
   id: number;
@@ -71,7 +72,7 @@ export function readProject(value: unknown): Project {
 export function readTicket(value: unknown): Ticket {
   const item = record(value);
   if (typeof item.archived !== "boolean") throw new Error("Invalid ticket archive state");
-  return { id: integer(item.id), project_id: integer(item.project_id), title: text(item.title), description: text(item.description), status: text(item.status), version: integer(item.version), created_at: text(item.created_at), updated_at: text(item.updated_at), archived: item.archived, assignee: text(item.assignee) };
+  return { id: integer(item.id), project_id: integer(item.project_id), title: text(item.title), description: text(item.description), status: text(item.status), version: integer(item.version), created_at: text(item.created_at), updated_at: text(item.updated_at), archived: item.archived, assignee: text(item.assignee), parent_id: item.parent_id === null ? null : integer(item.parent_id) };
 }
 export function readComment(value: unknown): Comment {
   const item = record(value);

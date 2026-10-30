@@ -478,7 +478,27 @@ func (server *Server) tickets(writer http.ResponseWriter, request *http.Request)
 		}
 		archiveFilter = value == "true"
 	}
-	rows, err := server.store.database.QueryContext(request.Context(), "SELECT "+ticketColumns+" FROM tickets WHERE project_id=? AND id>? AND (?='' OR instr(lower(title),lower(?))>0) AND archived=? ORDER BY id LIMIT ?", projectID, after, search, search, archiveFilter, limit)
+	query := "SELECT " + ticketColumns + " FROM tickets WHERE project_id=? AND id>? AND (?='' OR instr(lower(title),lower(?))>0) AND archived=?"
+	arguments := []any{projectID, after, search, search, archiveFilter}
+	if value, supplied := request.URL.Query()["parent_id"]; supplied {
+		if len(value) != 1 {
+			server.fail(writer, &problem{400, "Supply one positive parent_id"})
+			return
+		}
+		parentID, err := strconv.ParseInt(value[0], 10, 64)
+		if err != nil || parentID <= 0 {
+			server.fail(writer, &problem{400, "parent_id must be a positive integer"})
+			return
+		}
+		if _, err := readTicket(server.store.database.QueryRowContext(request.Context(), "SELECT "+ticketColumns+" FROM tickets WHERE project_id=? AND id=?", projectID, parentID)); err != nil {
+			server.fail(writer, err)
+			return
+		}
+		query += " AND parent_id=?"
+		arguments = append(arguments, parentID)
+	}
+	arguments = append(arguments, limit)
+	rows, err := server.store.database.QueryContext(request.Context(), query+" ORDER BY id LIMIT ?", arguments...)
 	if err != nil {
 		server.fail(writer, err)
 		return
@@ -517,11 +537,12 @@ func (server *Server) ticket(writer http.ResponseWriter, request *http.Request) 
 }
 
 type ticketInput struct {
-	Title       *string `json:"title"`
-	Description *string `json:"description"`
-	Status      *string `json:"status"`
-	Archived    *bool   `json:"archived"`
-	Assignee    *string `json:"assignee"`
+	Title       *string         `json:"title"`
+	Description *string         `json:"description"`
+	Status      *string         `json:"status"`
+	Archived    *bool           `json:"archived"`
+	Assignee    *string         `json:"assignee"`
+	ParentID    json.RawMessage `json:"parent_id"`
 }
 
 func validateTicket(input ticketInput) error {
@@ -554,6 +575,13 @@ func (server *Server) createTicket(writer http.ResponseWriter, request *http.Req
 		server.fail(writer, err)
 		return
 	}
+	var parentID *int64
+	if len(input.ParentID) > 0 {
+		if err := json.Unmarshal(input.ParentID, &parentID); err != nil || (parentID != nil && *parentID <= 0) {
+			server.fail(writer, &problem{400, "parent_id must be a positive integer or null"})
+			return
+		}
+	}
 	if input.Archived != nil {
 		server.fail(writer, &problem{400, "Archive existing tickets using PATCH"})
 		return
@@ -575,6 +603,15 @@ func (server *Server) createTicket(writer http.ResponseWriter, request *http.Req
 		project, err := readProject(transaction.QueryRowContext(request.Context(), "SELECT "+projectColumns+" FROM projects WHERE id=?", projectID))
 		if err != nil {
 			return nil, err
+		}
+		if parentID != nil {
+			parent, err := readTicket(transaction.QueryRowContext(request.Context(), "SELECT "+ticketColumns+" FROM tickets WHERE project_id=? AND id=?", projectID, *parentID))
+			if err != nil {
+				return nil, err
+			}
+			if parent.ParentID != nil {
+				return nil, &problem{400, "Subtickets cannot have subtickets; choose a top-level parent"}
+			}
 		}
 		status := project.Statuses[0]
 		if input.Status != nil {
@@ -599,12 +636,12 @@ func (server *Server) createTicket(writer http.ResponseWriter, request *http.Req
 			assignee = *input.Assignee
 		}
 		createdAt := time.Now().UTC().Format(time.RFC3339Nano)
-		result, err := transaction.ExecContext(request.Context(), "INSERT INTO tickets(project_id,title,description,status,created_at,updated_at,assignee) VALUES(?,?,?,?,?,?,?)", projectID, strings.TrimSpace(*input.Title), description, status, createdAt, createdAt, assignee)
+		result, err := transaction.ExecContext(request.Context(), "INSERT INTO tickets(project_id,title,description,status,created_at,updated_at,assignee,parent_id) VALUES(?,?,?,?,?,?,?,?)", projectID, strings.TrimSpace(*input.Title), description, status, createdAt, createdAt, assignee, parentID)
 		if err != nil {
 			return nil, err
 		}
 		id, err := result.LastInsertId()
-		return Ticket{ID: id, ProjectID: projectID, Title: strings.TrimSpace(*input.Title), Description: description, Status: status, Version: 1, CreatedAt: createdAt, UpdatedAt: createdAt, Assignee: assignee}, err
+		return Ticket{ID: id, ProjectID: projectID, Title: strings.TrimSpace(*input.Title), Description: description, Status: status, Version: 1, CreatedAt: createdAt, UpdatedAt: createdAt, Assignee: assignee, ParentID: parentID}, err
 	})
 	if err != nil {
 		server.fail(writer, err)
@@ -627,6 +664,10 @@ func (server *Server) updateTicket(writer http.ResponseWriter, request *http.Req
 	var input ticketInput
 	if err := decode(writer, request, &input); err != nil {
 		server.fail(writer, err)
+		return
+	}
+	if len(input.ParentID) > 0 {
+		server.fail(writer, &problem{400, "Parent is fixed at creation; existing tickets cannot be reparented"})
 		return
 	}
 	if input.Title == nil && input.Description == nil && input.Status == nil && input.Archived == nil && input.Assignee == nil {

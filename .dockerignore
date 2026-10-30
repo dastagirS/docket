@@ -13,3 +13,5 @@ frontend/.vite/
 !docker/
 !docker/data/
 !docker/data/.keep
+!skills/
+!skills/**

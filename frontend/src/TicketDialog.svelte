@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
   import Icon from "./Icon.svelte";
-  import { api, ApiError, errorMessage, ACTIVITY_VISIBLE_MAX, ASSIGNEE_BYTES_MAX, PAGE_SIZE, projectPath, ticketPath, readTicket, readPage, readComment, readEvent, readCommentResult, dateLabel, type Project, type Ticket, type Comment, type ChangeEvent } from "./api";
+  import { api, ApiError, errorMessage, ACTIVITY_VISIBLE_MAX, ASSIGNEE_BYTES_MAX, PAGE_SIZE, TICKETS_VISIBLE_MAX, projectPath, ticketPath, readTicket, readPage, readComment, readEvent, readCommentResult, dateLabel, type Project, type Ticket, type Comment, type ChangeEvent } from "./api";
 
   export let onsaved: (projectID: number) => Promise<void>;
   export let notify: (message: string) => void;
@@ -13,6 +13,11 @@
   let description = "";
   let status = "";
   let assignee = "";
+  let parentID: number | null = null;
+  let subtickets: Ticket[] = [];
+  let subticketsArchived = false;
+  let subticketsMore = false;
+  let subticketsLoading = false;
   let commentBody = "";
   let comments: Comment[] = [];
   let history: ChangeEvent[] = [];
@@ -39,7 +44,7 @@
     commentBody = "";
     return true;
   }
-  export async function open(selected: Project, ticketID: number | null, initialStatus = selected.statuses[0]): Promise<void> {
+  export async function open(selected: Project, ticketID: number | null, initialStatus = selected.statuses[0], initialParentID: number | null = null): Promise<void> {
     if (!close()) return;
     const currentGeneration = ++generation;
     const loaded = ticketID === null ? null : await api(ticketPath(selected.id, ticketID), {}, readTicket);
@@ -51,6 +56,11 @@
     description = loaded?.description ?? "";
     status = loaded?.status ?? initialStatus;
     assignee = loaded?.assignee ?? "";
+    parentID = loaded?.parent_id ?? initialParentID;
+    subtickets = [];
+    subticketsArchived = false;
+    subticketsMore = false;
+    subticketsLoading = false;
     comments = [];
     history = [];
     commentsMore = false;
@@ -64,14 +74,16 @@
     if (currentGeneration !== generation) return;
     dialog.showModal();
     titleInput.focus();
-    if (ticket) await Promise.all([loadComments(), loadHistory()]);
+    if (ticket) await Promise.all([loadComments(), loadHistory(), loadSubtickets()]);
   }
   export async function sync(selected: Project): Promise<void> {
-    if (!dialog.open || pending || commentsLoading || historyLoading || !ticket || project?.id !== selected.id) return;
+    if (!dialog.open || pending || commentsLoading || historyLoading || subticketsLoading || !ticket || project?.id !== selected.id) return;
     const currentGeneration = generation;
     const loaded = await api(ticketPath(selected.id, ticket.id), {}, readTicket);
-    if (currentGeneration !== generation || pending || commentsLoading || historyLoading) return;
+    if (currentGeneration !== generation || pending || commentsLoading || historyLoading || subticketsLoading) return;
     project = selected;
+    if (loaded.parent_id === null) await loadSubtickets(false, subtickets.length);
+    if (currentGeneration !== generation || pending) return;
     if (loaded.version === observedVersion) return;
     if (dirty) {
       reload = true;
@@ -87,6 +99,34 @@
     }
     await Promise.all([loadComments(false, comments.length), loadHistory(false, history.length)]);
     if (currentGeneration === generation) observedVersion = loaded.version;
+  }
+  async function loadSubtickets(more = false, visibleCount = PAGE_SIZE): Promise<void> {
+    if (!project || !ticket || ticket.parent_id !== null || subticketsLoading) return;
+    const previous = more ? subtickets : [];
+    if (previous.length >= TICKETS_VISIBLE_MAX) return;
+    const currentGeneration = generation;
+    const selectedParentID = ticket.id;
+    const selectedArchive = subticketsArchived;
+    subticketsLoading = true;
+    try {
+      const path = `${projectPath(project.id)}/tickets?parent_id=${selectedParentID}&archived=${selectedArchive}`;
+      let page = await api(`${path}&after=${previous.at(-1)?.id ?? 0}`, {}, readPage(readTicket));
+      const loaded = [...previous, ...page.items];
+      const pageCount = more ? 1 : Math.min(Math.max(1, Math.ceil(visibleCount / PAGE_SIZE)), TICKETS_VISIBLE_MAX / PAGE_SIZE);
+      for (let i = 1; i < pageCount && page.items.length === PAGE_SIZE; i++) {
+        if (currentGeneration !== generation) return;
+        page = await api(`${path}&after=${page.next_cursor}`, {}, readPage(readTicket));
+        loaded.push(...page.items);
+      }
+      if (currentGeneration !== generation) return;
+      subtickets = loaded.slice(0, TICKETS_VISIBLE_MAX);
+      subticketsMore = page.items.length === PAGE_SIZE && subtickets.length < TICKETS_VISIBLE_MAX;
+    } finally { if (currentGeneration === generation) subticketsLoading = false; }
+  }
+  async function showSubtickets(archived: boolean): Promise<void> {
+    if (subticketsLoading || pending) return;
+    subticketsArchived = archived;
+    await loadSubtickets();
   }
   async function loadComments(more = false, visibleCount = PAGE_SIZE): Promise<void> {
     if (!project || !ticket || commentsLoading) return;
@@ -143,7 +183,7 @@
     ticketError = "";
     try {
       const editing = ticket !== null;
-      const saved = await api(ticket ? ticketPath(selected.id, ticket.id) : `${projectPath(selected.id)}/tickets`, { method: ticket ? "PATCH" : "POST", headers: ticket ? { "If-Match": `"${ticket.version}"` } : {}, body: JSON.stringify({ title, description, status, assignee }) }, readTicket);
+      const saved = await api(ticket ? ticketPath(selected.id, ticket.id) : `${projectPath(selected.id)}/tickets`, { method: ticket ? "PATCH" : "POST", headers: ticket ? { "If-Match": `"${ticket.version}"` } : {}, body: JSON.stringify({ title, description, status, assignee, ...(!ticket ? { parent_id: parentID } : {}) }) }, readTicket);
       ticket = saved;
       assignee = saved.assignee;
       observedVersion = saved.version;
@@ -201,6 +241,9 @@
 <dialog id="ticket-dialog" class="ticket-dialog" bind:this={dialog} oncancel={(event) => { event.preventDefault(); close(); }}>
   <div class="ticket-top"><span id="ticket-reference" class="mono muted">{ticket && project ? `${project.key}-${ticket.id}` : "NEW TICKET"}</span><div class="ticket-top-actions"><button id="archive-ticket" class="quiet" hidden={!ticket} disabled={pending} onclick={() => run(toggleArchive)}><Icon name={ticket?.archived ? "restore" : "archive"} />{ticket?.archived ? "Restore" : "Archive"}</button><button id="close-ticket" class="icon-button" aria-label="Close ticket" disabled={pending} onclick={close}><Icon name="close" /></button></div></div>
   <p id="ticket-archived-banner" class="archived-banner" hidden={!ticket?.archived}><Icon name="archive" /> Archived ticket. Its description, comments, and history are retained.</p>
+  {#if parentID !== null && project}
+    <div class="ticket-parent"><span class="muted">Subticket of</span><button id="ticket-parent" class="quiet bordered" disabled={pending} onclick={() => run(() => open(project!, parentID))}>{project.key}-{parentID}<Icon name="arrow-up-right" /></button></div>
+  {/if}
   <form id="ticket-form" oninput={() => { dirty = true; }} onsubmit={(event) => run(() => save(event))}>
     <label class="sr-only" for="ticket-title">Ticket title</label><textarea id="ticket-title" bind:this={titleInput} bind:value={title} class="ticket-title" rows="2" maxlength="200" required placeholder="What needs to happen?" disabled={pending}></textarea>
     <label class="status-label">Status<select id="ticket-status" bind:value={status} required disabled={pending}>{#each project?.statuses ?? [] as name}<option value={name}>{name}</option>{/each}</select></label>
@@ -209,6 +252,18 @@
     <p id="ticket-error" class="form-error" role="alert">{ticketError}</p>
     <div class="form-actions"><button id="reload-ticket" class="quiet" type="button" hidden={!reload} disabled={pending} onclick={() => { if (project && ticket) run(() => open(project!, ticket!.id)); }}>Reload latest</button><button id="save-ticket" type="submit" class="primary" disabled={pending}>{ticket ? "Save changes" : "Create ticket"}</button></div>
   </form>
+  {#if ticket && parentID === null && project}
+    <section id="subtickets" class="subtickets" aria-label="Subtickets" aria-busy={subticketsLoading}>
+      <div class="section-heading"><h3>Subtickets <span class="muted">{subtickets.length}{subticketsMore ? "+" : ""}</span></h3><button id="add-subticket" class="quiet bordered" disabled={pending} onclick={() => run(() => open(project!, null, project!.statuses[0], ticket!.id))}><Icon name="plus" /> Add subticket</button></div>
+      <div class="view-switch subticket-visibility"><button id="active-subtickets" aria-pressed={!subticketsArchived} disabled={subticketsLoading || pending} onclick={() => run(() => showSubtickets(false))}>Active</button><button id="archived-subtickets" aria-pressed={subticketsArchived} disabled={subticketsLoading || pending} onclick={() => run(() => showSubtickets(true))}>Archived</button></div>
+      {#each subtickets as child (child.id)}
+        <button class="subticket-row" data-subticket-id={child.id} disabled={pending} onclick={() => run(() => open(project!, child.id))}><span class="mono muted">{project.key}-{child.id}</span><span class="subticket-title">{child.title}</span><span class="subticket-status">{child.status}{child.archived ? " · Archived" : ""}</span></button>
+      {:else}<p class="empty-activity">{subticketsLoading ? "Loading subtickets…" : subticketsArchived ? "No archived subtickets." : "No subtickets yet."}</p>{/each}
+      <button id="load-subtickets" class="quiet" hidden={!subticketsMore} disabled={subticketsLoading || pending} onclick={() => run(() => loadSubtickets(true))}>More subtickets</button>
+      {#if subtickets.length >= TICKETS_VISIBLE_MAX}<p class="empty-activity">Showing the first 1,000 subtickets. The full record remains available through the API.</p>{/if}
+      <small>Subtickets also appear on the main board. Status and archiving are independent.</small>
+    </section>
+  {/if}
   <section id="discussion" hidden={!ticket}>
     <div class="section-heading"><h3>Discussion</h3><span class="muted">Comments are permanent</span></div>
     <div id="comments">
