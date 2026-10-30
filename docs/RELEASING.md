@@ -15,12 +15,10 @@ The installer requires curl **8.4+** (so streaming download size limits are enfo
 After the first release has been published:
 
 ```sh
-installer=$(mktemp) &&
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/dastagirS/docket/releases/latest/download/install.sh -o "$installer" &&
-sh "$installer"
+curl -fsSL https://github.com/dastagirS/docket/raw/master/install.sh | sh
 ```
 
-The chained commands preserve download failures instead of hiding them behind an empty shell pipeline. Remove the temporary bootstrap file afterward. Prefer inspecting the script before execution when practical:
+The script downloads the binary from GitHub Releases. For stricter bootstrap error handling, prefer downloading and inspecting the script before execution:
 
 ```sh
 installer_directory=$(mktemp -d)

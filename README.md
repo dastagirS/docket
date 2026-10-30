@@ -23,9 +23,7 @@ Structured for agents. Visible to humans. Yours to host.
 Download and run the checksum-verifying installer:
 
 ```sh
-installer=$(mktemp) &&
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/dastagirS/docket/releases/latest/download/install.sh -o "$installer" &&
-sh "$installer"
+curl -fsSL https://github.com/dastagirS/docket/raw/master/install.sh | sh
 ```
 
 Installs to `~/.local/bin`. No sudo, profile edits, or service changes.
