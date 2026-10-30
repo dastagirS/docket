@@ -20,11 +20,8 @@ binary_bytes=$(wc -c < "$binary") || fail 'Cannot inspect executable size.'
 [ "$binary_bytes" -le "$binary_bytes_max" ] || fail 'Binary exceeds installer download limit.'
 case "$output_directory" in /*) ;; *) fail 'Output directory must be absolute.' ;; esac
 [ ! -e "$output_directory" ] && [ ! -L "$output_directory" ] || fail 'Output directory must not already exist; releases are not overwritten.'
-script_directory=$(dirname -- "$0") || fail 'Cannot locate packaging script.'
-repository_directory=$(CDPATH='' cd -- "$script_directory/.." && pwd) || fail 'Cannot locate repository sources.'
 mkdir -- "$output_directory" || fail 'Cannot create release output directory.'
 cp -- "$binary" "$output_directory/docket-linux-amd64" || fail 'Cannot package executable.'
-cp -- "$repository_directory/install.sh" "$output_directory/install.sh" || fail 'Cannot package installer.'
-chmod 755 "$output_directory/docket-linux-amd64" "$output_directory/install.sh" || fail 'Cannot set release file permissions.'
-(cd -- "$output_directory" && sha256sum docket-linux-amd64 install.sh > SHA256SUMS) || fail 'Cannot generate release checksums.'
+chmod 755 "$output_directory/docket-linux-amd64" || fail 'Cannot set release file permissions.'
+(cd -- "$output_directory" && sha256sum docket-linux-amd64 > SHA256SUMS) || fail 'Cannot generate release checksums.'
 printf 'Packaged %s for Linux x86-64 in %s\n' "$version" "$output_directory"

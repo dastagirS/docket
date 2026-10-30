@@ -5,8 +5,9 @@
 Linux x86-64 only, built by the existing pinned Docker toolchain: static musl, `GOAMD64=v1`, embedded Svelte UI and SQLite. Other operating systems/architectures are rejected rather than guessing a binary. Release assets are:
 
 - `docket-linux-amd64`: the native executable, without an archive/extraction step.
-- `install.sh`: the self-contained installer from this repository.
-- `SHA256SUMS`: hashes of both files.
+- `SHA256SUMS`: the executable’s SHA-256 checksum.
+
+`install.sh` lives in the repository root; it is not duplicated in release assets.
 
 The installer requires curl **8.4+** (so streaming download size limits are enforced), sha256sum, and standard Linux utilities including `mv -T`, mktemp, awk, and od. No Node, Docker, sudo, account setup, shell-profile edits, or service changes are performed by the installer.
 
@@ -23,7 +24,7 @@ The script downloads the binary from GitHub Releases. For stricter bootstrap err
 ```sh
 installer_directory=$(mktemp -d)
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://github.com/dastagirS/docket/releases/download/v0.1.0/install.sh -o "$installer_directory/install.sh"
+  https://github.com/dastagirS/docket/raw/v0.1.0/install.sh -o "$installer_directory/install.sh"
 # Inspect the downloaded script first, then:
 DOCKET_VERSION=v0.1.0 sh "$installer_directory/install.sh"
 ```
@@ -47,9 +48,9 @@ Alternatively, once the tag exists on GitHub, use **Run workflow** and enter tha
 
 The read-only build job runs frontend type checks, Go race/vet tests, vulnerability scans, baseline QEMU/SQLite checks, and real CLI/skill/installer tests and executable workflow-tag selection checks. Browser checks remain a separate local verification path because this workflow does not install a browser driver. Official Actions are pinned to full commit SHAs and checkout credentials are not persisted.
 
-Only the separate publish job receives `contents: write`. It downloads build artifacts without checking out/executing repository scripts or binaries, checks the manifest, and confirms the exact tag still resolves to the built commit before and after uploads. It attaches `docket-linux-amd64`, `install.sh`, and `SHA256SUMS` to the release identified by GitHub’s numeric ID. The installer also remains in the repository root for the README curl command.
+Only the separate publish job receives `contents: write`. It downloads build artifacts without checking out/executing repository scripts or binaries, checks the manifest, and confirms the exact tag still resolves to the built commit before and after uploads. It attaches `docket-linux-amd64` and `SHA256SUMS` to the release identified by GitHub’s numeric ID. The README fetches the installer from the repository root instead of release assets.
 
-An existing release keeps its notes and matching assets; missing assets are uploaded, while conflicting/incomplete assets are rejected without overwriting them. Since tag lookup only returns published releases, a missing result triggers an authenticated draft lookup before creating anything. Lookup is bounded to ten pages of 100 releases; ambiguous matches, API errors, or an incomplete lookup fail without creating another draft. Otherwise the job creates a **draft**, uploads and verifies every file, and publishes that exact draft by ID—not by its potentially ambiguous tag. Success requires the tag’s published release to have that same ID and all three assets with matching sizes and GitHub SHA-256 digests.
+An existing release keeps its notes and matching assets; missing assets are uploaded, while conflicting/incomplete assets are rejected without overwriting them. Since tag lookup only returns published releases, a missing result triggers an authenticated draft lookup before creating anything. Lookup is bounded to ten pages of 100 releases; ambiguous matches, API errors, or an incomplete lookup fail without creating another draft. Otherwise the job creates a **draft**, uploads and verifies every file, and publishes that exact draft by ID—not by its potentially ambiguous tag. Success requires the tag’s published release to have that same ID and both required assets with matching sizes and GitHub SHA-256 digests.
 
 To fill missing assets for an existing tag, start a new **Run workflow** from the updated default branch and enter that tag. Do not move/recreate the tag; **Re-run jobs** reuses the original workflow definition. A failed upload/publication may leave partial uploads or a draft: inspect release state before manually rerunning. No automatic write retries, asset deletion, or replacement are performed. GitHub manages the latest-release designation.
 

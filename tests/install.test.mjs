@@ -87,14 +87,14 @@ process.exit(result.status??1);
   };
 }
 
-test("release packaging produces the real binary, installer, and verifiable checksums without overwriting output", { timeout: 30000 }, async () => {
+test("release packaging produces only the real binary and verifiable checksums without overwriting output", { timeout: 30000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(),"docket-package-"));
   try {
     const output = join(directory,"release");
     await execute("sh",[packager,"v0.1.0",binary,output],{timeout:commandTimeoutMs});
-    assert.deepEqual((await readdir(output)).sort(),["SHA256SUMS",artifactName,"install.sh"].sort());
+    assert.deepEqual((await readdir(output)).sort(),["SHA256SUMS",artifactName].sort());
     assert.equal(checksum(await readFile(join(output,artifactName))),checksum(await readFile(binary)));
-    assert.deepEqual(await readFile(join(output,"install.sh")),await readFile(installer));
+    assert.ok((await stat(installer)).isFile(), "Repository installer must remain available");
     await execute("sha256sum",["--check","SHA256SUMS"],{cwd:output,timeout:commandTimeoutMs});
     await assert.rejects(execute("sh",[packager,"v0.1.0",binary,output],{timeout:commandTimeoutMs}),/Output directory must not already exist/);
     for (const version of ["latest","v01.2.3","v1.2.3-beta","v1.2.3\ninvalid"]) {

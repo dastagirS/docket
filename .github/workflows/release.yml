@@ -150,6 +150,16 @@ jobs:
                   raise RuntimeError('GitHub API response exceeded the release metadata limit')
               return json.loads(body)
 
+          def read_artifact(name, bytes_max):
+              path = pathlib.Path(name)
+              if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= bytes_max:
+                  raise ValueError('Missing, invalid, or oversized release file: ' + name)
+              with path.open('rb') as file:
+                  payload = file.read(bytes_max + 1)
+              if not 0 < len(payload) <= bytes_max:
+                  raise ValueError('Release file changed size beyond its limits: ' + name)
+              return payload, hashlib.sha256(payload).hexdigest()
+
           def check_tag():
               reference = urllib.parse.quote('refs/tags/' + tag, safe='')
               if request('GET', '/commits/' + reference)['sha'] != source_commit:
@@ -168,18 +178,15 @@ jobs:
               if len(tag) > tag_bytes_max or not re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag):
                   raise ValueError('Release tag must be a stable vMAJOR.MINOR.PATCH version')
               artifacts = {}
-              for name, bytes_max in [('docket-linux-amd64', 64 * 1024 * 1024), ('install.sh', 1024 * 1024), ('SHA256SUMS', 16 * 1024)]:
-                  path = pathlib.Path(name)
-                  if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= bytes_max:
-                      raise ValueError('Missing, invalid, or oversized release file: ' + name)
-                  with path.open('rb') as file:
-                      payload = file.read(bytes_max + 1)
-                  if len(payload) > bytes_max:
-                      raise ValueError('Release file grew beyond its limit: ' + name)
-                  artifacts[name] = (payload, hashlib.sha256(payload).hexdigest())
-              expected_manifest = ''.join(artifacts[name][1] + '  ' + name + '\n' for name in ('docket-linux-amd64', 'install.sh')).encode()
+              for name, bytes_max in [('docket-linux-amd64', 64 * 1024 * 1024), ('SHA256SUMS', 16 * 1024)]:
+                  artifacts[name] = read_artifact(name, bytes_max)
+              expected_manifest = (artifacts['docket-linux-amd64'][1] + '  docket-linux-amd64\n').encode()
               if artifacts['SHA256SUMS'][0] != expected_manifest:
-                  raise ValueError('Release checksum manifest does not match the packaged binary and installer')
+                  # Tagged source may package an installer; verify its manifest entry without publishing that file.
+                  installer_digest = read_artifact('install.sh', 1024 * 1024)[1]
+                  tagged_manifest = expected_manifest + (installer_digest + '  install.sh\n').encode()
+                  if artifacts['SHA256SUMS'][0] != tagged_manifest:
+                      raise ValueError('Release checksum manifest does not match the packaged files')
               check_tag()
               try:
                   release = request('GET', '/releases/tags/' + tag)
@@ -239,7 +246,7 @@ jobs:
                   if len(matching) != 1:
                       raise RuntimeError('Published release is missing a unique asset: ' + name)
                   check_asset(matching[0], name)
-              print('Verified published release ' + tag + ': docket-linux-amd64, install.sh, SHA256SUMS')
+              print('Verified published release ' + tag + ': docket-linux-amd64, SHA256SUMS')
           except Exception as error:
               if isinstance(error, urllib.error.HTTPError):
                   error.close()

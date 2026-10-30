@@ -76,7 +76,7 @@ const otherDraftIdentifier = 202;
 const createdReleaseIdentifier = 303;
 const sourceCommit = "1".repeat(commitHexLength);
 const releaseTag = "v0.0.1";
-const assetNames = ["docket-linux-amd64", "install.sh", "SHA256SUMS"];
+const assetNames = ["docket-linux-amd64", "SHA256SUMS"];
 const publisherTimeoutMs = 10000;
 const testTimeoutMs = 30000;
 const requestBytesMax = 1048576;
@@ -88,12 +88,15 @@ async function verifyPublication(scenario, callback) {
   const requests = [];
   let tagLookups = 0;
   const releases = new Map();
-  const payloads = new Map([[assetNames[0], Buffer.from("fixture executable")], [assetNames[1], Buffer.from("#!/bin/sh\nexit 0\n")]]);
+  const payloads = new Map([[assetNames[0], Buffer.from("fixture executable")]]);
   payloads.set("SHA256SUMS", Buffer.from([...payloads].map(([name, value]) => `${checksum(value)}  ${name}\n`).join("")));
+  const taggedInstaller = Buffer.from("#!/bin/sh\nexit 0\n");
+  if (scenario.endsWith("tagged-installer")) payloads.set("SHA256SUMS", Buffer.concat([payloads.get("SHA256SUMS"), Buffer.from(`${checksum(taggedInstaller)}  install.sh\n`)]));
   const asset = (name, value) => ({ name, size: value.length, state: "uploaded", digest: `sha256:${checksum(value)}` });
   if (!scenario.startsWith("new")) releases.set(publicReleaseIdentifier, { id: publicReleaseIdentifier, tag_name: releaseTag, draft: ["draft", "wrong-public-release", "ambiguous-draft"].includes(scenario), body: "Maintainer's release notes", assets: [] });
   // A same-tag draft must not intercept repairs to the already-published release.
   releases.set(otherDraftIdentifier, { id: otherDraftIdentifier, tag_name: ["existing", "partial", "matching", "conflict", "ambiguous-draft"].includes(scenario) ? releaseTag : "v9.9.9", draft: true, assets: [], body: "Unrelated draft" });
+  if (scenario === "tagged-installer") releases.get(publicReleaseIdentifier).assets = [...payloads, ["install.sh", taggedInstaller]].map(([name, value]) => asset(name, value));
   if (scenario === "partial") releases.get(publicReleaseIdentifier).assets = [asset(assetNames[0], payloads.get(assetNames[0]))];
   if (scenario === "matching") releases.get(publicReleaseIdentifier).assets = [...payloads].map(([name, value]) => asset(name, value));
   if (scenario === "conflict") releases.get(publicReleaseIdentifier).assets = [asset(assetNames[0], Buffer.from("different executable"))];
@@ -168,6 +171,7 @@ async function verifyPublication(scenario, callback) {
   try {
     await mkdir(join(directory, "release-assets"));
     for (const [name, payload] of payloads) await writeFile(join(directory, "release-assets", name), payload);
+    if (scenario.endsWith("tagged-installer")) await writeFile(join(directory, "release-assets", "install.sh"), taggedInstaller);
     server.listen(0, "127.0.0.1"); await once(server, "listening");
     const origin = `http://127.0.0.1:${server.address().port}`;
     const start = workflow.indexOf("      - name: Verify artifacts and publish through a draft\n");
@@ -232,5 +236,18 @@ test("publisher refuses ambiguous drafts, failed listings, or incomplete bounded
     assert.equal(code, 1);
     assert.ok(requests.every(request => request.method === "GET"));
     assert.ok(requests.some(request => request.path.endsWith("/releases")));
+  });
+});
+
+
+test("publisher ignores surplus installer artifacts and leaves existing release files untouched", { timeout: testTimeoutMs }, async () => {
+  for (const scenario of ["tagged-installer", "new-tagged-installer"]) await verifyPublication(scenario, async ({ code, releases, requests }) => {
+    assert.equal(code, 0);
+    if (scenario === "tagged-installer") {
+      assert.ok(requests.every(request => request.method === "GET"));
+      assert.ok(releases.get(publicReleaseIdentifier).assets.some(asset => asset.name === "install.sh"));
+    } else {
+      assert.deepEqual(releases.get(createdReleaseIdentifier).assets.map(asset => asset.name).sort(), [...assetNames].sort());
+    }
   });
 });
