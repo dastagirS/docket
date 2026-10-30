@@ -249,3 +249,17 @@ The installed CLI was updated atomically to SHA-256 `f335c38cf69ca6d34544b1000ef
 ## README presentation and current-workflow documentation
 
 The README now uses a centered Queue mark/tagline, compact feature table, numbered quickstart, and links instead of expanding operational detail. Current user/agent documentation describes the home registry directly, with no transitional setup or older-client instructions. Local links and whitespace checks pass; 42 Go tests with race/vet and 25 CLI/skill/installer checks passed after rebuilding the embedded references. The installed CLI now matches SHA-256 `1d0f8883bead2cc63a61d4154233b1c2b76a2ee3d606ff68501e6cde57fa27f3`, and its printed references were checked for the current workflow. Runtime behavior is unchanged and the service remains PID 1062363; no live records or user bindings were altered. No commit or push was made.
+
+
+## Release asset publication
+
+The public `v0.0.1` release had no assets even though its tag-triggered build/publish jobs reported success. An isolated duplicate-tag simulation reproduced the old publisher returning success while the public release stayed empty. The fixed workflow targets numeric release IDs, repairs missing assets on an existing release without changing its notes, preserves verified matching assets, refuses conflicts, and checks the final published release ID plus all three server-reported file sizes/SHA-256 digests.
+
+The regression failed before the fix with an empty public asset list; the fixed implementation passes 8 workflow checks covering existing/partial releases, unrelated same-tag drafts, new/draft publication, matching/conflicting assets, tag moves, API errors/credential redirects, failed uploads, bad digests, and incorrect/incomplete final publication. All 49 browser/CLI/skill/installer/workflow process checks passed; `make test` passed using its existing Docker cache. YAML, all shell blocks, embedded Python syntax, and the separate write-job boundary were checked. Read-only requests to GitHub confirmed the full-tag commit lookup and current asset metadata schema.
+
+Publication tests use an isolated HTTP API fixture, not a live GitHub write. The old CLI reproduction models the observed failure; it does not independently prove the behavior of a specific hosted gh CLI version. No live release, tag, notes, assets, installed executable, or service was modified. Hosted publication and a real isolated curl install must still be verified after these workflow changes are pushed and a new manual run completes. Existing jobs must not simply be rerun with their unchanged workflow definition.
+
+
+### Final release-workflow review
+
+Found and fixed a draft-recovery issue: GitHub documents `GET /releases/tags/{tag}` as a published-release lookup, but the initial fixture incorrectly returned drafts. After correcting the fixture to the documented contract, the resume-draft regression failed because the original draft remained unpublished while a replacement was created. On 404 the publisher now performs a bounded authenticated release listing, resumes a unique matching draft by ID, and refuses ambiguous matches, listing failures, or incomplete lookup without creating another draft. The corrected resume check passes, together with dedicated no-write checks for those failure paths. This is fixture-backed local evidence; authenticated hosted draft recovery is not yet exercised.

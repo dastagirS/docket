@@ -110,12 +110,139 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          current_commit=$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)
-          if [[ "$current_commit" != "$SOURCE_COMMIT" ]]; then
-            echo 'Release tag moved after build; refusing to publish mismatched assets.' >&2
-            exit 1
-          fi
           cd release-assets
-          sha256sum --check SHA256SUMS
-          gh release create "$RELEASE_TAG" --verify-tag --draft --title "Docket $RELEASE_TAG" --generate-notes docket-linux-amd64 install.sh SHA256SUMS
-          gh release edit "$RELEASE_TAG" --draft=false
+          python3 - <<'PYTHON'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          class RefuseRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, file, code, message, headers, target):
+                  raise RuntimeError('Refusing to forward release credentials through a redirect')
+
+          opener = urllib.request.build_opener(RefuseRedirect())
+          response_bytes_max = 1024 * 1024
+          release_assets_max = 1000
+          releases_per_page = 100
+          release_pages_max = 10
+          tag_bytes_max = 64
+          request_timeout_seconds = 30
+
+          # Only fixed GitHub API hosts receive the job token; artifact contents are never executed.
+          def request(method, path, payload=None, upload=False):
+              origin = 'https://uploads.github.com' if upload else 'https://api.github.com'
+              headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'User-Agent': 'docket-release', 'X-GitHub-Api-Version': '2022-11-28'}
+              if isinstance(payload, dict):
+                  payload = json.dumps(payload).encode()
+                  headers['Content-Type'] = 'application/json'
+              elif payload is not None:
+                  headers['Content-Type'] = 'application/octet-stream'
+              outgoing = urllib.request.Request(origin + '/repos/' + repository + path, data=payload, headers=headers, method=method)
+              with opener.open(outgoing, timeout=request_timeout_seconds) as response:
+                  body = response.read(response_bytes_max + 1)
+              if len(body) > response_bytes_max:
+                  raise RuntimeError('GitHub API response exceeded the release metadata limit')
+              return json.loads(body)
+
+          def check_tag():
+              reference = urllib.parse.quote('refs/tags/' + tag, safe='')
+              if request('GET', '/commits/' + reference)['sha'] != source_commit:
+                  raise RuntimeError('Release tag moved; refusing to publish mismatched assets')
+
+          def check_asset(asset, name):
+              payload, digest = artifacts[name]
+              if asset.get('size') != len(payload) or asset.get('state') != 'uploaded' or asset.get('digest') != 'sha256:' + digest:
+                  raise RuntimeError('Conflicting or incomplete release asset: ' + name + '; no existing assets were overwritten')
+
+          try:
+              repository = os.environ['GH_REPO']
+              tag = os.environ['RELEASE_TAG']
+              source_commit = os.environ['SOURCE_COMMIT']
+              token = os.environ['GH_TOKEN']
+              if len(tag) > tag_bytes_max or not re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag):
+                  raise ValueError('Release tag must be a stable vMAJOR.MINOR.PATCH version')
+              artifacts = {}
+              for name, bytes_max in [('docket-linux-amd64', 64 * 1024 * 1024), ('install.sh', 1024 * 1024), ('SHA256SUMS', 16 * 1024)]:
+                  path = pathlib.Path(name)
+                  if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= bytes_max:
+                      raise ValueError('Missing, invalid, or oversized release file: ' + name)
+                  with path.open('rb') as file:
+                      payload = file.read(bytes_max + 1)
+                  if len(payload) > bytes_max:
+                      raise ValueError('Release file grew beyond its limit: ' + name)
+                  artifacts[name] = (payload, hashlib.sha256(payload).hexdigest())
+              expected_manifest = ''.join(artifacts[name][1] + '  ' + name + '\n' for name in ('docket-linux-amd64', 'install.sh')).encode()
+              if artifacts['SHA256SUMS'][0] != expected_manifest:
+                  raise ValueError('Release checksum manifest does not match the packaged binary and installer')
+              check_tag()
+              try:
+                  release = request('GET', '/releases/tags/' + tag)
+              except urllib.error.HTTPError as error:
+                  status = error.code
+                  error.close()
+                  if status != 404:
+                      raise RuntimeError('Cannot inspect the existing release (HTTP ' + str(status) + ')')
+                  # Tag lookup only finds published releases; list authenticated drafts before creating another.
+                  matching_releases = {}
+                  for page in range(1, release_pages_max + 1):
+                      releases = request('GET', f'/releases?per_page={releases_per_page}&page={page}')
+                      if not isinstance(releases, list) or len(releases) > releases_per_page:
+                          raise ValueError('GitHub returned an unexpected release listing')
+                      for candidate in releases:
+                          if candidate['tag_name'] == tag:
+                              matching_releases[candidate['id']] = candidate
+                              if len(matching_releases) > 1:
+                                  raise RuntimeError('Multiple releases match this tag; inspect drafts before rerunning')
+                      if len(releases) < releases_per_page:
+                          break
+                      if page == release_pages_max:
+                          raise RuntimeError('Release lookup limit reached; cannot safely rule out an existing draft')
+                  if matching_releases:
+                      release = next(iter(matching_releases.values()))
+                  else:
+                      release = request('POST', '/releases', {'tag_name': tag, 'target_commitish': source_commit, 'name': 'Docket ' + tag, 'generate_release_notes': True, 'draft': True})
+              release_identifier = release['id']
+              if type(release_identifier) is not int or release_identifier <= 0 or release['tag_name'] != tag:
+                  raise ValueError('GitHub returned an unexpected release identity')
+              if len(release['assets']) > release_assets_max:
+                  raise ValueError('Release asset count exceeded its limit')
+              existing_names = set()
+              for asset in release['assets']:
+                  name = asset['name']
+                  if name in artifacts:
+                      if name in existing_names:
+                          raise ValueError('Duplicate release asset: ' + name)
+                      check_asset(asset, name)
+                      existing_names.add(name)
+              for name in artifacts:
+                  if name not in existing_names:
+                      uploaded = request('POST', f'/releases/{release_identifier}/assets?name=' + urllib.parse.quote(name, safe=''), artifacts[name][0], upload=True)
+                      if uploaded.get('name') != name:
+                          raise ValueError('GitHub returned an unexpected uploaded asset name')
+                      check_asset(uploaded, name)
+              check_tag()
+              if release['draft']:
+                  request('PATCH', f'/releases/{release_identifier}', {'draft': False})
+              current = request('GET', '/releases/tags/' + tag)
+              if current['id'] != release_identifier or current['tag_name'] != tag or current['draft']:
+                  raise RuntimeError('The tag does not resolve to the release that received the verified assets')
+              if len(current['assets']) > release_assets_max:
+                  raise ValueError('Published asset count exceeded its limit')
+              for name in artifacts:
+                  matching = [asset for asset in current['assets'] if asset['name'] == name]
+                  if len(matching) != 1:
+                      raise RuntimeError('Published release is missing a unique asset: ' + name)
+                  check_asset(matching[0], name)
+              print('Verified published release ' + tag + ': docket-linux-amd64, install.sh, SHA256SUMS')
+          except Exception as error:
+              if isinstance(error, urllib.error.HTTPError):
+                  error.close()
+              print('Release publication failed: ' + str(error) + '. Inspect the release before manually rerunning; no automatic write retries were attempted.', file=sys.stderr)
+              sys.exit(1)
+          PYTHON
