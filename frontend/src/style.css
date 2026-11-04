@@ -158,8 +158,13 @@ dialog::backdrop{background:#0008;backdrop-filter:blur(3px)}
 .status-chip{display:inline-flex;align-items:center;gap:7px;max-width:100%;border:1px solid #302e34;background:#1b1a1e;border-radius:6px;padding:6px 9px;font-size:11px;color:#c4c1cb}
 .status-chip-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .status-chip .status-dot{width:8px;height:8px}
-.status-list{display:grid;gap:4px;list-style:none;padding:0;margin:0;max-height:240px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#51405f transparent}
-.status-row{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:center;gap:7px;min-height:36px;padding:3px 6px;border:1px solid #302d35;border-radius:7px;background:#1b191e;transition:border-color .12s,background .12s}
+.status-list{position:relative;display:grid;gap:4px;list-style:none;padding:0;margin:0;max-height:240px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#51405f transparent}
+.status-row{cursor:grab;display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:center;gap:7px;min-height:36px;padding:3px 6px;border:1px solid #302d35;border-radius:7px;background:#1b191e;transition:border-color .12s,background .12s}
+.status-sorting{user-select:none}
+.status-sorting,.status-sorting *{cursor:grabbing}
+.status-row.status-dragging{position:relative;z-index:1;pointer-events:none;cursor:grabbing;border-color:var(--focus);box-shadow:0 8px 16px #0006;opacity:.85;transition:none}
+.status-insert-before{box-shadow:inset 0 2px var(--focus)}
+.status-insert-after{box-shadow:inset 0 -2px var(--focus)}
 .status-row:focus-within{border-color:var(--focus);background:var(--raised)}
 .status-row.status-invalid{border-color:#a56c78}
 .status-order{font:10px ui-monospace,SFMono-Regular,Consolas,monospace;color:#77717f;text-align:center;font-variant-numeric:tabular-nums}
@@ -171,10 +176,7 @@ dialog::backdrop{background:#0008;backdrop-filter:blur(3px)}
 .status-name[aria-invalid=true]{border-color:#a56c78}
 .status-default{flex-shrink:0;padding:3px 5px;border:1px solid #4e405f;border-radius:4px;background:#33283f;color:#cbb9e3;font-size:9px;line-height:1;white-space:nowrap}
 .status-controls{display:flex;align-items:center;gap:5px}
-.status-reorder{display:flex;align-items:center;border:1px solid #39333f;border-radius:5px;background:#151318}
 .status-control{display:grid;place-items:center;width:26px;height:26px;padding:0;color:#b3a9bf;border-radius:4px}
-.status-reorder .status-control{border-radius:0}
-.status-down{border-left:1px solid #39333f}
 .status-control .icon{width:13px;height:13px}
 .status-control:hover{color:#eee9f7;background:#312b3b}
 .status-control:disabled{opacity:.25;cursor:default;background:transparent}
@@ -186,6 +188,7 @@ dialog::backdrop{background:#0008;backdrop-filter:blur(3px)}
 .add-status:disabled{cursor:default}
 #status-count{padding:3px 6px;border:1px solid var(--border);border-radius:5px;background:var(--raised);color:var(--muted);font-size:9px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .workflow-hint{font-size:10px;color:#93899e;line-height:1.7;margin-top:10px}
+#workflow-reorder-help{font-size:12px;line-height:16px}
 .workflow-safety{color:#77717f;margin-top:3px}
 .settings-dialog .status-list{gap:6px;max-height:300px}
 .settings-dialog .status-row{min-height:44px;padding:6px 10px}

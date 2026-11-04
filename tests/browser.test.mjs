@@ -259,15 +259,17 @@ test("workflow editor: preview, inline rows, ordering, bounds, validation, and p
     await check("document.getElementById('workflow-default-help').textContent.includes('New tickets') && document.querySelector('.status-name').getAttribute('aria-describedby').includes('workflow-default-help')", "The default status should explain where new tickets start");
     await check("document.querySelector('.workflow-heading #status-count').textContent === '5 / 12'", "Status capacity should be visible in the section heading");
     await check("document.getElementById('workflow-toggle').textContent.includes('Collapse')", "Expanded workflow should have a clear collapse action");
-    await check("document.querySelector('.status-up').disabled && document.querySelector('.status-row:last-child .status-down').disabled", "Boundary reorder controls should be disabled");
+    await check("document.querySelectorAll('.status-up,.status-down').length === 0", "Arrow buttons should be removed");
     await browser("fill", ".status-row:first-child .status-name", "Ideas");
-    await browser("click", ".status-row:first-child .status-down");
+    await browser("eval", "document.querySelector('.status-name').focus(); true");
+    await browser("press", "Alt+ArrowDown");
     await check("document.querySelectorAll('.status-name')[1].value === 'Ideas'", "Moving a status must retain its edited name");
     await check("document.querySelector('.status-row:first-child .status-name').value === 'In Progress' && document.querySelector('.status-row:first-child .status-default')?.textContent === 'Default'", "Default indicator should follow the first position after reordering");
-    await browser("click", ".status-row:nth-child(2) .status-up");
+    await browser("eval", "document.querySelectorAll('.status-name')[1].focus(); true");
+    await browser("press", "Alt+ArrowUp");
     await check("document.querySelector('.status-name').value === 'Ideas'", "Moving a status up must retain its edited name");
-    await browser("eval", "document.querySelector('.status-row:first-child .status-down').focus(); true");
-    await browser("press", "Enter");
+    await browser("eval", "document.querySelector('.status-name').focus(); true");
+    await browser("press", "Alt+ArrowDown");
     await browser("fill", ".status-row:first-child .status-name", "In Review");
     await browser("click", "#workflow-toggle");
     await browser("click", "#save-project");
@@ -1342,6 +1344,128 @@ test("home navigation skips archived defaults, preserves archived deep links, an
     assert.deepEqual(await request(server.origin, `/api/projects/${first.id}`), archived);
     assert.deepEqual(await request(server.origin, `/api/projects/${active.id}`), archivedSecond);
   } finally {
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("workflow rows: whole-row mouse/touch drag, keyboard order, cancellation, scrolling, and explicit save", { timeout: 90000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-status-drag-"));
+  const session = `docket-status-drag-${process.pid}`;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  let pointer;
+  const dragSettleMs = 50;
+  const evaluate = async expression => {
+    const response = JSON.parse(await browser("eval", expression, "--json"));
+    assert.equal(response.success, true);
+    return response.data.result;
+  };
+  const point = async (selector, bottom = false) => evaluate(`(() => {
+    const bounds = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+    return {x: bounds.left + bounds.width / 2, y: ${bottom ? "bounds.bottom - 3" : "bounds.top + bounds.height / 2"}};
+  })()`);
+  const order = () => evaluate("[...document.querySelectorAll('.status-name')].map(input => input.value)");
+  const begin = async source => {
+    await pointer.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...source });
+    await pointer.send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", buttons: 1, clickCount: 1, ...source });
+    await pointer.send("Input.dispatchMouseEvent", { type: "mouseMoved", buttons: 1, x: source.x, y: source.y + 12 });
+    await browser("wait", ".status-dragging");
+  };
+  const release = async target => {
+    await pointer.send("Input.dispatchMouseEvent", { type: "mouseMoved", buttons: 1, ...target });
+    await delay(dragSettleMs);
+    await pointer.send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", buttons: 0, clickCount: 1, ...target });
+    await browser("wait", "--fn", "!document.querySelector('.status-dragging')");
+  };
+  try {
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Status ordering", key: "ORDER", statuses: ["Queue", "Build", "Review", "Done"] });
+    await browser("set", "viewport", "1440", "1000");
+    await browser("open", `${server.origin}/projects/${project.id}`);
+    await browser("click", "#project-settings");
+    assert.equal(await evaluate("document.querySelectorAll('.status-up,.status-down').length"), 0, "Arrow buttons must be replaced, not supplemented");
+    await browser("fill", ".status-row:first-child .status-name", "Ideas");
+    pointer = await connectNativeDrag(server.origin, browser);
+    await browser("eval", "document.addEventListener('pointerdown', event => { window.statusPointerTrusted = event.isTrusted; }, true); true");
+    await begin(await point(".status-row:first-child .status-name"));
+    assert.equal(await evaluate("window.statusPointerTrusted"), true);
+    if (process.env.DOCKET_SCREENSHOTS) {
+      await mkdir(process.env.DOCKET_SCREENSHOTS, { recursive: true });
+      await browser("screenshot", join(process.env.DOCKET_SCREENSHOTS, "workflow-row-drag-desktop-active.png"));
+    }
+    assert.equal(await evaluate("document.getElementById('save-project').disabled"), true);
+    await browser("press", "Escape");
+    await release(await point(".status-row:last-child"));
+    assert.deepEqual(await order(), ["Ideas", "Build", "Review", "Done"]);
+    assert.equal(await evaluate("document.getElementById('project-dialog').open"), true);
+    await begin(await point(".status-row:first-child .status-name"));
+    await release(await point("#project-dialog-title"));
+    assert.deepEqual(await order(), ["Ideas", "Build", "Review", "Done"]);
+    await begin(await point(".status-row:first-child .status-name"));
+    await release(await point(".status-row:last-child", true));
+    assert.deepEqual(await order(), ["Build", "Review", "Done", "Ideas"]);
+    assert.deepEqual((await request(server.origin, `/api/projects/${project.id}`)).statuses, project.statuses, "Drag must not save automatically");
+    await browser("click", "#save-project");
+    await browser("wait", "--fn", "!document.getElementById('project-dialog').open");
+    assert.deepEqual((await request(server.origin, `/api/projects/${project.id}`)).statuses, ["Build", "Review", "Done", "Ideas"]);
+    await browser("set", "viewport", "390", "844");
+    await browser("click", "#project-settings");
+    await pointer.send("Emulation.setTouchEmulationEnabled", { enabled: true });
+    const tap = await point(".status-row:first-child .status-name");
+    await pointer.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ ...tap, id: 1 }] });
+    await pointer.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    assert.equal(await evaluate("document.activeElement.classList.contains('status-name') && !document.querySelector('.status-dragging')"), true, "A quick tap must still edit the name");
+    const source = await point(".status-row:last-child .status-name");
+    const target = await point(".status-row:first-child");
+    await pointer.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ ...source, id: 1 }] });
+    await browser("wait", ".status-dragging");
+    await pointer.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ ...target, y: target.y - 12, id: 1 }] });
+    await delay(dragSettleMs);
+    await pointer.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await browser("wait", "--fn", "!document.querySelector('.status-dragging')");
+    assert.deepEqual(await order(), ["Ideas", "Build", "Review", "Done"]);
+    await pointer.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ ...target, id: 1 }] });
+    await browser("wait", ".status-dragging");
+    await pointer.send("Input.dispatchTouchEvent", { type: "touchCancel", touchPoints: [] });
+    assert.equal(await evaluate("!document.querySelector('.status-dragging') && !document.getElementById('save-project').disabled"), true);
+    assert.deepEqual(await order(), ["Ideas", "Build", "Review", "Done"]);
+    await pointer.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+    await browser("eval", "document.querySelector('.status-name').focus(); true");
+    await browser("press", "Alt+ArrowDown");
+    assert.deepEqual(await order(), ["Build", "Ideas", "Review", "Done"]);
+    for (let i = 0; i < 8; i++) {
+      await browser("eval", "document.getElementById('add-status').scrollIntoView({block:'center'}); true");
+      await browser("click", "#add-status");
+      await browser("fill", ".status-row:last-child .status-name", `Stage ${i + 1}`);
+    }
+    await browser("eval", "document.getElementById('workflow-statuses').scrollIntoView({block:'center'}); document.getElementById('workflow-statuses').scrollTop = 0; true");
+    const scrollHeight = await evaluate("document.getElementById('workflow-statuses').scrollHeight");
+    await begin(await point(".status-row:first-child .status-order"));
+    const edge = await point("#workflow-statuses", true);
+    await pointer.send("Input.dispatchMouseEvent", { type: "mouseMoved", buttons: 1, ...edge });
+    await browser("wait", "--fn", "(() => { const list = document.getElementById('workflow-statuses'); return list.scrollTop + list.clientHeight >= list.scrollHeight - 2; })()");
+    assert.equal(await evaluate("document.getElementById('workflow-statuses').scrollHeight"), scrollHeight, "Dragging must not enlarge its own scroll range");
+    await release(edge);
+    assert.equal((await order()).at(-1), "Build");
+    if (process.env.DOCKET_SCREENSHOTS) {
+      await mkdir(process.env.DOCKET_SCREENSHOTS, { recursive: true });
+      await browser("screenshot", join(process.env.DOCKET_SCREENSHOTS, "workflow-row-drag-phone.png"));
+    }
+    await browser("click", "#cancel-project");
+    assert.deepEqual((await request(server.origin, `/api/projects/${project.id}`)).statuses, ["Build", "Review", "Done", "Ideas"]);
+    await browser("click", "#add-project");
+    await browser("fill", "#project-title", "Drag creation");
+    await browser("fill", "#project-key", "CREATE");
+    await browser("click", "#workflow-toggle");
+    await browser("eval", "document.getElementById('workflow-statuses').scrollIntoView({block:'center'}); true");
+    const defaults = await order();
+    await begin(await point(".status-row:first-child .status-name"));
+    await release(await point(".status-row:last-child", true));
+    assert.deepEqual(await order(), [...defaults.slice(1), defaults[0]]);
+    await browser("click", "#save-project");
+    await browser("wait", "--fn", "location.pathname === '/projects/2' && !document.getElementById('project-dialog').open");
+    assert.deepEqual((await request(server.origin, "/api/projects/2")).statuses, [...defaults.slice(1), defaults[0]]);
+  } finally {
+    pointer?.close();
     try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
   }
 });
