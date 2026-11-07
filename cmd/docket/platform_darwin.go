@@ -3,12 +3,25 @@ package main
 /*
 #include <sys/types.h>
 #include <sys/acl.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <stdlib.h>
 
 static int docket_has_acl(const char *path) {
-    acl_t acl = acl_get_file(path, ACL_TYPE_EXTENDED);
-    if (acl == NULL) return -errno;
+    filesec_t security = filesec_init();
+    if (security == NULL) return -errno;
+    struct stat status;
+    if (lstatx_np(path, &status, security) != 0) {
+        int error = errno;
+        filesec_free(security);
+        return -error;
+    }
+    // ENOENT means no ACL only after a successful file-security snapshot.
+    acl_t acl = NULL;
+    int fetched = filesec_get_property(security, FILESEC_ACL, &acl);
+    int error = errno;
+    filesec_free(security);
+    if (fetched != 0) return error == ENOENT ? 0 : -error;
     acl_entry_t entry;
     int found = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry);
     int result = found == 0 ? 1 : (errno == EINVAL ? 0 : -errno);
