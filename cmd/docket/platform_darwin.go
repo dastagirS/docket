@@ -1,27 +1,14 @@
 package main
 
 /*
-#include <sys/types.h>
 #include <sys/acl.h>
-#include <sys/stat.h>
 #include <errno.h>
-#include <stdlib.h>
+#include <stddef.h>
 
-static int docket_has_acl(const char *path) {
-    filesec_t security = filesec_init();
-    if (security == NULL) return -errno;
-    struct stat status;
-    if (lstatx_np(path, &status, security) != 0) {
-        int error = errno;
-        filesec_free(security);
-        return -error;
-    }
-    // ENOENT means no ACL only after a successful file-security snapshot.
-    acl_t acl = NULL;
-    int fetched = filesec_get_property(security, FILESEC_ACL, &acl);
-    int error = errno;
-    filesec_free(security);
-    if (fetched != 0) return error == ENOENT ? 0 : -error;
+static int docket_has_acl(int descriptor) {
+    // The caller holds an open file, so ENOENT cannot mean a missing path.
+    acl_t acl = acl_get_fd_np(descriptor, ACL_TYPE_EXTENDED);
+    if (acl == NULL) return errno == ENOENT ? 0 : -errno;
     acl_entry_t entry;
     int found = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry);
     int result = found == 0 ? 1 : (errno == EINVAL ? 0 : -errno);
@@ -35,24 +22,27 @@ import (
 	"errors"
 	"os"
 	"syscall"
-	"unsafe"
 )
 
 const terminalReadRequest = syscall.TIOCGETA
 
 // Renaming a new inode must not silently discard an existing macOS ACL or file flags.
-func checkUpdatePermissions(path string) error {
-	information, err := os.Lstat(path)
+func checkUpdatePermissions(path string) (result error) {
+	// A swapped-in FIFO must not block inspection before its type is checked.
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { result = errors.Join(result, file.Close()) }()
+	information, err := file.Stat()
 	if err != nil {
 		return err
 	}
 	status, ok := information.Sys().(*syscall.Stat_t)
-	if !ok || status.Flags != 0 {
-		return errors.New("Updater refuses macOS files with protected file flags")
+	if !ok || !information.Mode().IsRegular() || status.Flags != 0 {
+		return errors.New("Updater requires a regular macOS file without protected file flags")
 	}
-	location := C.CString(path)
-	defer C.free(unsafe.Pointer(location))
-	if C.docket_has_acl(location) != 0 {
+	if C.docket_has_acl(C.int(file.Fd())) != 0 {
 		return errors.New("Updater refuses custom macOS ACLs or unreadable security metadata")
 	}
 	return nil

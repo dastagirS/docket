@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -34,6 +35,23 @@ func TestDarwinUpdateACLPermissions(t *testing.T) {
 	}
 	if err := checkUpdatePermissions(path); err != nil {
 		t.Fatalf("Removing the custom ACL must restore eligibility: %v", err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(path, alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkUpdatePermissions(alias); err == nil {
+		t.Fatal("A symlink must not be opened for ACL inspection")
+	}
+	if err := checkUpdatePermissions(t.TempDir()); err == nil {
+		t.Fatal("A directory must not be accepted as an executable")
+	}
+	namedPipe := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(namedPipe, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkUpdatePermissions(namedPipe); err == nil {
+		t.Fatal("A FIFO must be rejected without waiting for a writer")
 	}
 	if err := checkUpdatePermissions(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Fatal("A missing file must not be treated as an absent ACL")

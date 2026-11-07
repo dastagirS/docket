@@ -21,12 +21,12 @@ frontend-dev:
 	npm --prefix frontend run dev
 
 verify-portable:
-	docker build --platform linux/amd64 --target portable-test .
+	docker build --platform linux/amd64 --target portable-test --build-arg BUILD_VERSION="$(BUILD_VERSION)" .
 
 vet: test
 
 security:
-	docker build --platform linux/amd64 --target security .
+	docker build --platform linux/amd64 --target security --build-arg BUILD_VERSION="$(BUILD_VERSION)" .
 
 test-cli: build
 	DOCKET_BINARY="$(abspath $(BUILD_DIRECTORY))/docket" node --test tests/cli.test.mjs

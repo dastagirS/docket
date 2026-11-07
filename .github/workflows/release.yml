@@ -22,7 +22,7 @@ jobs:
   build:
     if: github.repository == 'dastagirS/docket'
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - runner: ubuntu-24.04
@@ -32,8 +32,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     outputs:
-      tag: ${{ steps.source.outputs.tag }}
-      commit: ${{ steps.source.outputs.commit }}
+      tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.checkout.outputs.commit }}
     steps:
       - name: Validate stable release tag
         id: version
@@ -61,17 +61,10 @@ jobs:
           fi
           printf 'tag=%s\n' "$release_tag" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        id: checkout
         with:
           ref: refs/tags/${{ steps.version.outputs.tag }}
           persist-credentials: false
-      - name: Record checked-out source
-        id: source
-        env:
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          commit=$(git rev-parse HEAD)
-          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
@@ -97,7 +90,7 @@ jobs:
       - name: Build and ad-hoc sign Apple Silicon executable
         if: runner.os == 'macOS'
         env:
-          BUILD_VERSION: ${{ steps.source.outputs.tag }}
+          BUILD_VERSION: ${{ steps.version.outputs.tag }}
           CGO_ENABLED: '1'
           GOOS: darwin
           GOARCH: arm64
@@ -116,28 +109,22 @@ jobs:
       - name: Go tests, race detection, vet, and frontend type checks
         if: runner.os == 'Linux'
         run: make test
-      - name: Go vulnerability scans
-        if: runner.os == 'Linux'
-        run: make security
-      - name: Baseline CPU and SQLite portability checks
-        if: runner.os == 'Linux'
-        run: make verify-portable
-      - name: Build isolated release executable
+      - name: Build and verify Linux release
         if: runner.os == 'Linux'
         env:
-          BUILD_VERSION: ${{ steps.source.outputs.tag }}
-        run: make build BUILD_DIRECTORY="$RUNNER_TEMP/docket-build"
+          BUILD_VERSION: ${{ steps.version.outputs.tag }}
+        run: make --jobs=1 build security verify-portable BUILD_DIRECTORY="$RUNNER_TEMP/docket-build"
       - name: Real CLI and embedded-skill checks
         env:
           DOCKET_BINARY: ${{ runner.temp }}/docket-build/docket
-          DOCKET_EXPECTED_BUILD_VERSION: ${{ steps.source.outputs.tag }}
+          DOCKET_EXPECTED_BUILD_VERSION: ${{ steps.version.outputs.tag }}
         run: node --test tests/cli.test.mjs tests/skill.test.mjs tests/install.test.mjs tests/workflow.test.mjs tests/release.test.mjs
       - name: Package release assets
         env:
-          RELEASE_TAG: ${{ steps.source.outputs.tag }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
           sh scripts/package-release.sh "$RELEASE_TAG" "$RUNNER_TEMP/docket-build/docket" "$RUNNER_TEMP/docket-release"
-          printf '%s\n' '${{ steps.source.outputs.commit }}' > "$RUNNER_TEMP/docket-release/SOURCE_COMMIT"
+          printf '%s\n' '${{ steps.checkout.outputs.commit }}' > "$RUNNER_TEMP/docket-release/SOURCE_COMMIT"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: release-${{ matrix.asset }}

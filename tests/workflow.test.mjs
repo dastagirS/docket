@@ -64,11 +64,23 @@ test("manual release checks out the validated tag and retains all pre-publicatio
   assert.match(workflow,/ref: refs\/tags\/\$\{\{ steps\.version\.outputs\.tag \}\}/);
   assert.match(workflow,/RELEASE_TAG: \$\{\{ steps\.version\.outputs\.tag \}\}/);
   assert.match(workflow,/group: release-\$\{\{ inputs\.tag \|\| github\.ref_name \}\}/);
-  for(const command of ["make test","make security","make verify-portable","tests/cli.test.mjs","tests/skill.test.mjs","tests/install.test.mjs","tests/workflow.test.mjs","tests/release.test.mjs"]) assert.ok(workflow.includes(command),`Missing gate: ${command}`);
-  assert.match(workflow,/BUILD_VERSION: \$\{\{ steps\.source\.outputs\.tag \}\}/);
-  assert.match(workflow,/DOCKET_EXPECTED_BUILD_VERSION: \$\{\{ steps\.source\.outputs\.tag \}\}/);
+  for(const command of ["make test","make --jobs=1 build security verify-portable","tests/cli.test.mjs","tests/skill.test.mjs","tests/install.test.mjs","tests/workflow.test.mjs","tests/release.test.mjs"]) assert.ok(workflow.includes(command),`Missing gate: ${command}`);
+  assert.match(workflow,/BUILD_VERSION: \$\{\{ steps\.version\.outputs\.tag \}\}/);
+  assert.match(workflow,/DOCKET_EXPECTED_BUILD_VERSION: \$\{\{ steps\.version\.outputs\.tag \}\}/);
+  assert.match(workflow,/commit: \$\{\{ steps\.checkout\.outputs\.commit \}\}/);
+  assert.match(workflow,/uses: actions\/checkout@[a-f0-9]{40}[^\n]*\n        id: checkout\n/);
+  assert.match(workflow,/fail-fast: true/);
+  assert.doesNotMatch(workflow,/steps\.source\.|Record checked-out source/);
   assert.match(workflow,/needs: build/);
   assert.match(workflow,/current\['id'\] != release_identifier/);
+});
+
+test("Linux release build, security, and portability share the selected version", { timeout: 15000 }, async () => {
+  const version = "v0.0.4";
+  const { stdout } = await execute("make", ["--dry-run", "--jobs=1", "build", "security", "verify-portable", `BUILD_VERSION=${version}`, "BUILD_DIRECTORY=release-command-proof"], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax });
+  const commands = stdout.trim().split("\n");
+  assert.deepEqual(commands.map(command => command.match(/--target ([^ ]+)/)?.[1]), ["artifact", "security", "portable-test"]);
+  for (const command of commands) assert.ok(command.includes(`--build-arg BUILD_VERSION="${version}"`), "Every release target must use the same stamped build: " + command);
 });
 
 const commitHexLength = 40;
