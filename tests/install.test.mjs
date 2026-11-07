@@ -20,7 +20,7 @@ const fixtureRequestsMax = 20;
 const fixtureConnectionsMax = 8;
 const manifestBytesMax = 16384;
 const checksum = value => createHash("sha256").update(value).digest("hex");
-const artifactName = "docket-linux-amd64";
+const artifactName = process.platform === "darwin" ? "docket-darwin-arm64" : "docket-linux-amd64";
 
 async function runInstaller(fixture, environment = {}, arguments_ = [], input) {
   try {
@@ -37,7 +37,8 @@ async function runInstaller(fixture, environment = {}, arguments_ = [], input) {
   }
 }
 
-async function fixtureFor(payload, manifest = `${checksum(payload)}  ${artifactName}\n`, responseMode = "normal") {
+async function fixtureFor(payload, manifest, responseMode = "normal", releaseAsset = artifactName) {
+  if (manifest === undefined) manifest = `${checksum(payload)}  ${releaseAsset}\n`;
   const directory = await mkdtemp(join(tmpdir(), "docket-installer-"));
   const tools = join(directory, "tools");
   const home = join(directory, "home");
@@ -72,7 +73,7 @@ process.exit(result.status??1);
     requests.push(request.url);
     if(responseMode==="redirect") { response.writeHead(302,{Location:request.url}); response.end(); return; }
     if(responseMode==="oversized") { response.writeHead(200,{"Content-Length":manifestBytesMax+1}); response.end(); return; }
-    const body = request.url.endsWith("/SHA256SUMS") ? manifest : request.url.endsWith(`/${artifactName}`) ? payload : null;
+    const body = request.url.endsWith("/SHA256SUMS") ? manifest : request.url.endsWith(`/${releaseAsset}`) ? payload : null;
     if (body === null) { response.writeHead(404); response.end(); return; }
     response.writeHead(200, { "Content-Length": Buffer.byteLength(body), "Content-Type": "application/octet-stream" });
     response.end(body);
@@ -95,7 +96,7 @@ test("release packaging produces only the real binary and verifiable checksums w
     assert.deepEqual((await readdir(output)).sort(),["SHA256SUMS",artifactName].sort());
     assert.equal(checksum(await readFile(join(output,artifactName))),checksum(await readFile(binary)));
     assert.ok((await stat(installer)).isFile(), "Repository installer must remain available");
-    await execute("sha256sum",["--check","SHA256SUMS"],{cwd:output,timeout:commandTimeoutMs});
+    await execute(process.platform === "darwin" ? "shasum" : "sha256sum", process.platform === "darwin" ? ["-a","256","-c","SHA256SUMS"] : ["--check","SHA256SUMS"], {cwd:output,timeout:commandTimeoutMs});
     await assert.rejects(execute("sh",[packager,"v0.1.0",binary,output],{timeout:commandTimeoutMs}),/Output directory must not already exist/);
     for (const version of ["latest","v01.2.3","v1.2.3-beta","v1.2.3\ninvalid"]) {
       await assert.rejects(execute("sh",[packager,version,binary,join(directory,"invalid")],{timeout:commandTimeoutMs}));
@@ -171,7 +172,7 @@ test("installer rejects unsupported platforms, invalid versions and unsafe desti
     assert.notEqual((await runInstaller(fixture)).code,0);
     assert.equal(await readFile(original,"utf8"),"do not change");
     await rm(join(fixture.destination,"docket"));
-    for (const [operatingSystem,architecture] of [["Darwin","x86_64"],["Linux","aarch64"]]) {
+    for (const [operatingSystem,architecture] of [["Darwin","i386"],["Linux","aarch64"]]) {
       await writeFile(join(fixture.tools,"uname"),`#!/bin/sh\ncase "$1" in -s) printf '%s\\n' '${operatingSystem}';; -m) printf '%s\\n' '${architecture}';; *) exit 1;; esac\n`,{mode:0o755});
       assert.notEqual((await runInstaller(fixture)).code,0);
     }
@@ -204,7 +205,7 @@ test("installer download size and redirect bounds reject bad responses and wrong
       assert.deepEqual(await readdir(fixture.temporary),[]);
       if(mode==="redirect") assert.equal(fixture.requests.length,4,"Exactly the original request plus three allowed redirects");
       if(mode==="oversized") assert.equal(fixture.requests.length,1,"Oversized manifest must stop before binary download");
-      if(mode==="wrong-architecture") assert.match(result.stderr,/not a Linux x86-64 ELF binary/);
+      if(mode==="wrong-architecture") assert.match(result.stderr,/not (?:a Linux x86-64 ELF binary|an Apple Silicon Mach-O executable)/);
     } finally { await fixture.close(); }
   }
 });
@@ -235,7 +236,7 @@ test("installer upgrades a running disposable Docket executable without restarti
     const executableBefore=await stat(target);
     const installed=await runInstaller(fixture);
     assert.equal(installed.code,0,installed.stderr);
-    assert.equal((await stat(`/proc/${child.pid}/exe`)).ino,executableBefore.ino,"Running server must retain its original executable inode");
+    if (process.platform === "linux") assert.equal((await stat(`/proc/${child.pid}/exe`)).ino,executableBefore.ino,"Running server must retain its original executable inode");
     assert.equal(child.exitCode,null,"Existing server must remain running");
     assert.equal(child.signalCode,null);
     const health=await fetch(origin+"/healthz",{signal:AbortSignal.timeout(commandTimeoutMs)});
@@ -265,4 +266,28 @@ test("truncated piped installers do not run a partial installation body", { time
     assert.deepEqual(await readdir(fixture.temporary),[]);
     await assert.rejects(stat(fixture.destination),{code:"ENOENT"});
   } finally { await fixture.close(); }
+});
+
+
+test("installer selects Apple Silicon assets and accepts only matching Mach-O headers", { timeout: 30000 }, async () => {
+  const payload = Buffer.alloc(64);
+  Buffer.from("cffaedfe0c0000010000000002000000", "hex").copy(payload);
+  for (const matching of [true, false]) {
+  payload[4] = matching ? 12 : 7;
+  const fixture = await fixtureFor(payload, undefined, "normal", "docket-darwin-arm64");
+  try {
+    await writeFile(join(fixture.tools, "uname"), '#!/bin/sh\ncase "$1" in -s) echo Darwin;; -m) echo arm64;; *) exit 1;; esac\n', { mode: 0o755 });
+    await writeFile(join(fixture.tools, "codesign"), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    if (process.platform !== "darwin") {
+      const move = (await execute("sh", ["-c", "command -v mv"], { timeout: commandTimeoutMs })).stdout.trim();
+      await writeFile(join(fixture.tools, "mv"), `#!/bin/sh\n[ "$1" = -fh ] || exit 1\nshift\nexec '${move}' -fT "$@"\n`, { mode: 0o755 });
+    }
+    const result = await runInstaller(fixture);
+    if (!matching) { assert.notEqual(result.code, 0); await assert.rejects(stat(fixture.destination), {code:"ENOENT"}); continue; }
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(checksum(await readFile(join(fixture.destination, "docket"))), checksum(payload));
+    assert.ok(fixture.requests.some(path => path.endsWith("/docket-darwin-arm64")));
+    assert.ok(!fixture.requests.some(path => path.endsWith("/docket-linux-amd64")));
+  } finally { await fixture.close(); }
+  }
 });

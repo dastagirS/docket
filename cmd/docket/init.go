@@ -76,7 +76,7 @@ func terminalInput(input io.Reader) (bool, error) {
 	var status syscall.Errno
 	if err := connection.Control(func(descriptor uintptr) {
 		var settings syscall.Termios
-		_, _, status = syscall.Syscall(syscall.SYS_IOCTL, descriptor, syscall.TCGETS, uintptr(unsafe.Pointer(&settings)))
+		_, _, status = syscall.Syscall(syscall.SYS_IOCTL, descriptor, terminalReadRequest, uintptr(unsafe.Pointer(&settings)))
 	}); err != nil {
 		return false, errors.New("Cannot inspect initialization terminal")
 	}

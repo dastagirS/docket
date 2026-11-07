@@ -17,6 +17,23 @@ docket --skill --references commands.md
 
 A bare `docket` prints help. Start the server explicitly with `docket serve`; use `docket serve --help` for its options.
 
+## Version and self-update
+
+```sh
+docket version
+docket update
+```
+
+Release executables carry their stable `vMAJOR.MINOR.PATCH` version; local builds report `dev` unless built with `make build BUILD_VERSION=vMAJOR.MINOR.PATCH`. `docket version` (also `--version`) prints text without contacting a server. `docket update` reports JSON, downloads the latest published stable release from GitHub, and updates only the actual executable being invoked—not another installed copy. Linux x86-64 and Apple Silicon macOS are supported.
+
+Equal or newer stable versions are left alone. Development/unversioned builds refuse replacement unless explicitly invoked with `docket update --force`; that can discard local features absent from the stable release. Force does not bypass checksum/platform/version verification or downgrade a known newer stable version.
+
+Updates verify bounded HTTPS downloads, the unique binary checksum, ELF/Mach-O architecture, and embedded Docket release metadata. The verified file is synced and atomically renamed in the executable’s own directory, preserving its owner/group and permission mode. No sudo, database/registry changes, Docket API calls, or service management occur. A service running from the replaced file keeps its old executable until you deliberately restart it. A service using a different executable path is not upgraded by updating your CLI copy.
+
+The executable must be owned by the invoking user, have one hard link, and have no setuid/setgid, file-capability privileges, custom access ACLs, or protected macOS file flags. A private `.<executable-name>.update.lock` prevents simultaneous updates; it is not expired or stolen automatically. Normal errors and cancellation clean up owned lock/staging files. After a killed process or interrupted machine, inspect that lock’s PID and any staging files before manual recovery. No automatic write retries occur. External replacements/edits detected before rename are preserved; hostile same-user filesystem races and power-loss durability are not guaranteed.
+
+Failures before replacement leave the executable unchanged. A finalization/output error after replacement reports exit 6: inspect `docket version`, the executable path, and the lock before retrying. Checksums and embedded versions establish consistency, not independent publisher authenticity; trust still depends on GitHub/TLS and repository access.
+
 ## Connection and output
 
 ```sh
@@ -32,7 +49,7 @@ Without a binding, server precedence is command `--server`, then `DOCKET_URL`, t
 
 The server URL must be an HTTP(S) origin without credentials, query, fragment, or subpath, matching the service's configured public origin. `localhost` and `127.0.0.1` are not interchangeable under Host validation. HTTPS certificates are verified normally; no insecure-TLS option is provided.
 
-All client successes are single JSON objects on stdout, using the API's existing object/page shapes. Errors are single JSON objects on stderr, with stdout empty unless writing a result itself failed. Discard stdout whenever the exit status is nonzero. `--json` is accepted for agent conventions, but JSON is already the default and `--json=false` is rejected. Help and bundled skill/reference output are text. Interactive init prompts also use stderr; noninteractive invocations remain JSON-only. Server mode retains operational logging on stderr.
+All client successes are single JSON objects on stdout, using the API's existing object/page shapes. Errors are single JSON objects on stderr, with stdout empty unless writing a result itself failed. Discard stdout whenever the exit status is nonzero. `--json` is accepted for agent conventions, but JSON is already the default and `--json=false` is rejected. Version, help, and bundled skill/reference output are text. Interactive init prompts also use stderr; noninteractive invocations remain JSON-only. Server mode retains operational logging on stderr.
 
 Flags follow the command and its positional ID. Common flags are `--server`, `--actor`, `--timeout` (default `10s`, positive, maximum `1m`), and `--json`. HTTP and JSON-input reads have separate timeout budgets. JSON input must reach EOF within its read budget. File opening/stat calls still depend on the local filesystem. JSON bodies are bounded to 64 KiB and responses to 16 MiB. Non-regular input files, including FIFOs, are rejected; `--input -` is the supported stream input.
 

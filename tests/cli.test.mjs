@@ -639,3 +639,25 @@ isolatedTest("central registry retains external edits made during a remote init 
     assert.equal((await cli(["ticket","list"],{cwd:folder})).code,2,"Affected implicit scope must stop for reconciliation");
   } finally { try { await new Promise(resolve=>proxy.close(resolve)); } finally { try { await stopServer(server.child); } finally { await rm(directory,{recursive:true,force:true}); } } }
 });
+
+
+isolatedTest("CLI executable maintenance is offline-discoverable and independent of folder bindings", { timeout: 15000 }, async (_context, home) => {
+  await mkdir(join(home, ".docket"));
+  await writeFile(join(home, ".docket", "registry.json"), "invalid registry");
+  const version = await cli(["version"]);
+  assert.equal(version.code, 0, version.stderr);
+  assert.match(version.stdout.trim(), /^(dev|v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$/);
+  if (process.env.DOCKET_EXPECTED_BUILD_VERSION) assert.equal(version.stdout.trim(), process.env.DOCKET_EXPECTED_BUILD_VERSION);
+  const alias = await cli(["--version"]);
+  assert.equal(alias.code, 0, alias.stderr);
+  assert.equal(alias.stdout, version.stdout);
+  const help = await cli(["update", "--help"]);
+  assert.equal(help.code, 0, help.stderr);
+  assert.match(help.stdout, /--force/);
+  assert.match(help.stdout, /No sudo, database changes, or service restart/);
+  const invalid = await cli(["update", "--json=false"]);
+  assert.equal(invalid.code, 2);
+  assert.equal(invalid.stdout, "");
+  assert.equal(JSON.parse(invalid.stderr).error.code, "usage");
+  assert.deepEqual(await readdir(home), [".docket"]);
+});

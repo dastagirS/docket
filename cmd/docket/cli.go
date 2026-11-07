@@ -24,6 +24,8 @@ const cliHelp = `Docket — ticket commands for humans and agents
 
 Usage:
   docket --skill [--references [filename]]
+  docket version
+  docket update [--force] [--json]
   docket doctor [options]
   docket project init [options]
   docket project list|create [options]
@@ -34,7 +36,7 @@ Usage:
   docket events list [--project PROJECT] [options]
   docket serve [server options]
 
-Client results are JSON on stdout; errors are JSON on stderr. Help/skill output is Markdown/text.
+Client results are JSON on stdout; errors are JSON on stderr. Version/help/skill output is text.
 Flags follow the command and its positional ID. Use COMMAND --help for flags.
 Writes to existing records require --version from a previous read.
 Use --input FILE (or - for stdin) for JSON write bodies instead of field flags.
@@ -59,6 +61,18 @@ func execute(arguments []string, input io.Reader, output, diagnostics io.Writer)
 	if len(arguments) == 0 || arguments[0] == "help" || arguments[0] == "--help" || arguments[0] == "-h" {
 		if _, err := io.WriteString(output, cliHelp); err != nil {
 			return emitFailure(diagnostics, &cliFailure{Exit: exitFailure, Code: "output_error", Message: "Cannot write help to stdout"})
+		}
+		return 0
+	}
+	if arguments[0] == "update" {
+		return executeUpdate(arguments[1:], output, diagnostics)
+	}
+	if arguments[0] == "version" || arguments[0] == "--version" {
+		if len(arguments) != 1 {
+			return emitFailure(diagnostics, errors.New("Use docket version without additional arguments"))
+		}
+		if _, err := fmt.Fprintln(output, buildVersion); err != nil {
+			return emitFailure(diagnostics, &cliFailure{Exit: exitFailure, Code: "output_error", Message: "Cannot write version"})
 		}
 		return 0
 	}

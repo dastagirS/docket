@@ -33,6 +33,7 @@ test("CLI skill has discoverable metadata and self-contained reference links", a
 test("CLI skill command families match the installed/built CLI help without server requests", { timeout: 30000 }, async () => {
   const binary = process.env.DOCKET_BINARY ? resolve(process.env.DOCKET_BINARY) : "docket";
   const commands = [
+    ["update"],
     ["doctor"],
     ...["list", "create", "get", "update", "archive", "restore"].map(action => ["project", action]),
     ...["list", "create", "get", "update", "archive", "restore", "history"].map(action => ["ticket", action]),

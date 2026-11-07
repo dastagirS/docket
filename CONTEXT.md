@@ -26,6 +26,8 @@ A small, independent ticketing system for humans and API clients. External integ
 
 **Folder binding**: A canonical folder-to-project/server association in the private user registry at `~/.docket/registry.json`, created by `project init`. It is a convenience, not authorization or a Pi ownership receipt.
 
+**Release version**: The executable’s stable `vMAJOR.MINOR.PATCH` identifier, distinct from a record’s integer mutation version. Local builds default to `dev`.
+
 **Integration**: An external client that uses Docket's API and events to add its own behavior.
 
 **Owner**: The sole human operator of a Docket instance, not an authenticated account in v1.
@@ -59,3 +61,6 @@ A small, independent ticketing system for humans and API clients. External integ
 - CLI initialization resolved: first init creates a project and records a folder binding in the home registry. Re-init displays counts including archived tickets and subtickets; the choices are keep (default), create another while preserving the old project, or archive old and replace. Archived keys remain reserved. Replacement is a journaled multi-step operation, not one cross-HTTP/filesystem transaction; incomplete work blocks implicit scope until explicitly reconciled.
 
 - User-registry storage resolved: one private `~/.docket` directory per user, with a versioned `registry.json` and init recovery journal. Commands match the nearest canonical registered ancestor within the current Git boundary, never a global last-used board. Conflicting or pending registry state fails closed.
+
+- Self-update resolved: `docket update` is explicit local maintenance, independent of folder bindings and the Docket service API. It replaces only the invoked executable using verified stable GitHub assets; services/data are not changed or restarted. Development/unversioned builds require explicit `--force`; known equal/newer stable builds are not downgraded. Updates use a private exclusive lock and atomic same-directory replacement, with no automatic write retries or stale-lock stealing.
+- Release platform scope: Linux x86-64 and Apple Silicon macOS 14+. CI uses separate native Linux/macOS jobs, stamped release versions, and matching source-commit receipts; publication requires both binaries and one combined checksum list. macOS uses ad-hoc signing, not Developer ID signing/notarization. The repository installer and self-updater select the device’s own artifact and reject unsupported platforms. The first two-platform release uses a fresh tag containing these changes; `v0.0.1` remains untouched, with no Linux-only repair compatibility added to the new workflow.

@@ -20,8 +20,20 @@ binary_bytes=$(wc -c < "$binary") || fail 'Cannot inspect executable size.'
 [ "$binary_bytes" -le "$binary_bytes_max" ] || fail 'Binary exceeds installer download limit.'
 case "$output_directory" in /*) ;; *) fail 'Output directory must be absolute.' ;; esac
 [ ! -e "$output_directory" ] && [ ! -L "$output_directory" ] || fail 'Output directory must not already exist; releases are not overwritten.'
+header_bytes=8
+machine_offset_bytes=18
+machine_size_bytes=2
+signature=$(od -An -N "$header_bytes" -tx1 "$binary" | tr -d '[:space:]') || fail 'Cannot identify executable format.'
+case "$signature" in
+    7f454c460201*)
+        machine=$(od -An -j "$machine_offset_bytes" -N "$machine_size_bytes" -tx1 "$binary" | tr -d '[:space:]') || fail 'Cannot inspect Linux CPU architecture.'
+        [ "$machine" = 3e00 ] || fail 'Linux releases require an x86-64 executable.'
+        asset=docket-linux-amd64 ;;
+    cffaedfe0c000001) asset=docket-darwin-arm64 ;;
+    *) fail 'Only Linux x86-64 ELF and Apple Silicon Mach-O assets are supported.' ;;
+esac
 mkdir -- "$output_directory" || fail 'Cannot create release output directory.'
-cp -- "$binary" "$output_directory/docket-linux-amd64" || fail 'Cannot package executable.'
-chmod 755 "$output_directory/docket-linux-amd64" || fail 'Cannot set release file permissions.'
-(cd -- "$output_directory" && sha256sum docket-linux-amd64 > SHA256SUMS) || fail 'Cannot generate release checksums.'
-printf 'Packaged %s for Linux x86-64 in %s\n' "$version" "$output_directory"
+cp -- "$binary" "$output_directory/$asset" || fail 'Cannot package executable.'
+chmod 755 "$output_directory/$asset" || fail 'Cannot set release file permissions.'
+(cd -- "$output_directory" && if command -v sha256sum >/dev/null 2>&1; then sha256sum "$asset"; else shasum -a 256 "$asset"; fi > SHA256SUMS) || fail 'Cannot generate release checksums.'
+printf 'Packaged %s (%s) in %s\n' "$version" "$asset" "$output_directory"

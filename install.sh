@@ -31,11 +31,11 @@ download() {
 
 main() {
     if [ "$#" -eq 1 ] && { [ "$1" = '--help' ] || [ "$1" = '-h' ]; }; then
-        printf '%s\n' 'Install Docket for Linux x86-64.' \
+        printf '%s\n' 'Install Docket for Linux x86-64 or Apple Silicon macOS.' \
             'Usage: sh install.sh' \
             'DOCKET_VERSION: latest (default) or a stable tag such as v0.1.0' \
             'DOCKET_INSTALL_DIR: absolute destination directory (default: $HOME/.local/bin)' \
-            'Requires curl 8.4+, sha256sum, and standard Linux utilities, including mv -T.' \
+            'Requires curl 8.4+, sha256sum or shasum, and standard system utilities.' \
             'Verifies release checksums; never runs Docket, uses sudo, or changes services.'
         return
     fi
@@ -47,13 +47,24 @@ main() {
         case "$version" in *[!v0-9.]*) fail 'Invalid release tag.' ;; esac
         printf '%s\n' "$version" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || fail 'Use latest or a stable vMAJOR.MINOR.PATCH tag.'
     fi
-    for utility in uname curl sha256sum awk grep mktemp od tr cat chmod mkdir mv rm; do
+    for utility in uname curl awk grep mktemp od tr cat chmod mkdir mv rm; do
         command -v "$utility" >/dev/null 2>&1 || fail "Required utility is missing: $utility"
     done
     operating_system=$(uname -s) || fail 'Cannot determine the operating system.'
     architecture=$(uname -m) || fail 'Cannot determine the CPU architecture.'
-    [ "$operating_system" = Linux ] || fail 'Only Linux x86-64 releases are currently available.'
-    case "$architecture" in x86_64|amd64) ;; *) fail 'Only Linux x86-64 releases are currently available.' ;; esac
+    case "$operating_system/$architecture" in
+        Linux/x86_64|Linux/amd64) asset=docket-linux-amd64 ;;
+        Darwin/arm64|Darwin/aarch64) asset=docket-darwin-arm64 ;;
+        Darwin/x86_64)
+            command -v sysctl >/dev/null 2>&1 || fail 'Cannot identify Apple Silicon hardware.'
+            [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ] || fail 'Intel macOS is not supported.'
+            asset=docket-darwin-arm64 ;;
+        *) fail 'Supported releases: Linux x86-64 and Apple Silicon macOS.' ;;
+    esac
+    if command -v sha256sum >/dev/null 2>&1; then checksum_command=sha256sum
+    elif command -v shasum >/dev/null 2>&1; then checksum_command=shasum
+    else fail 'SHA-256 verification requires sha256sum or shasum.'; fi
+    if [ "$operating_system" = Darwin ]; then command -v codesign >/dev/null 2>&1 || fail 'macOS signature validation requires codesign.'; fi
     if [ -n "${DOCKET_INSTALL_DIR:-}" ]; then
         install_directory=$DOCKET_INSTALL_DIR
     else
@@ -75,7 +86,6 @@ main() {
     else
         release_url=$repository/releases/download/$version
     fi
-    asset=docket-linux-amd64
     connection_timeout_seconds=10
     download_timeout_seconds=120
     redirects_max=3
@@ -101,20 +111,38 @@ main() {
         END { if (count != 1 || invalid) exit 1; print checksum }
     ' "$temporary_directory/SHA256SUMS") || fail 'Missing, duplicated, or malformed binary checksum.'
     download "$release_url/$asset" "$temporary_directory/$asset" "$binary_bytes_max"
-    actual=$(sha256sum < "$temporary_directory/$asset") || fail 'Cannot calculate the binary checksum.'
+    if [ "$checksum_command" = sha256sum ]; then
+        actual=$(sha256sum < "$temporary_directory/$asset") || fail 'Cannot calculate the binary checksum.'
+    else
+        actual=$(shasum -a 256 < "$temporary_directory/$asset") || fail 'Cannot calculate the binary checksum.'
+    fi
     actual=${actual%% *}
     [ "$actual" = "$expected" ] || fail 'SHA-256 mismatch. No existing installation was changed.'
-    signature=$(od -An -N "$identification_size_bytes" -tx1 "$temporary_directory/$asset") || fail 'Cannot inspect the binary header.'
-    signature=$(printf '%s' "$signature" | tr -d '[:space:]')
-    machine=$(od -An -j "$machine_offset_bytes" -N "$machine_size_bytes" -tx1 "$temporary_directory/$asset") || fail 'Cannot inspect the binary architecture.'
-    machine=$(printf '%s' "$machine" | tr -d '[:space:]')
-    [ "$signature" = 7f454c460201 ] && [ "$machine" = 3e00 ] || fail 'Release asset is not a Linux x86-64 ELF binary.'
+    if [ "$asset" = docket-linux-amd64 ]; then
+        signature=$(od -An -N "$identification_size_bytes" -tx1 "$temporary_directory/$asset") || fail 'Cannot inspect the binary header.'
+        signature=$(printf '%s' "$signature" | tr -d '[:space:]')
+        machine=$(od -An -j "$machine_offset_bytes" -N "$machine_size_bytes" -tx1 "$temporary_directory/$asset") || fail 'Cannot inspect the binary architecture.'
+        machine=$(printf '%s' "$machine" | tr -d '[:space:]')
+        [ "$signature" = 7f454c460201 ] && [ "$machine" = 3e00 ] || fail 'Release asset is not a Linux x86-64 ELF binary.'
+    else
+        macho_header_bytes=16
+        signature=$(od -An -N "$macho_header_bytes" -tx1 "$temporary_directory/$asset") || fail 'Cannot inspect the Mach-O header.'
+        signature=$(printf '%s' "$signature" | tr -d '[:space:]')
+        case "$signature" in cffaedfe0c000001????????02000000) ;; *) fail 'Release asset is not an Apple Silicon Mach-O executable.' ;; esac
+        codesign --verify --strict "$temporary_directory/$asset" || fail 'macOS release signature validation failed.'
+    fi
     mkdir -p -- "$install_directory" || fail 'Cannot create installation directory; no sudo is used.'
     staging_file=$(mktemp "$install_directory/.docket-install.XXXXXXXX") || fail 'Cannot stage the executable in the destination directory.'
     cat "$temporary_directory/$asset" > "$staging_file" || fail 'Cannot copy the verified executable.'
     chmod 755 "$staging_file" || fail 'Cannot set executable permissions.'
     # Same-directory rename keeps a running executable intact and prevents partial upgrades.
-    mv -fT -- "$staging_file" "$target" || fail 'Cannot atomically replace the executable.'
+    [ ! -L "$target" ] && { [ ! -e "$target" ] || [ -f "$target" ]; } || fail 'Destination changed before replacement.'
+    if [ "$operating_system" = Darwin ]; then
+        mv -fh -- "$staging_file" "$target" || fail 'Cannot atomically replace the executable.'
+    else
+        mv -fT -- "$staging_file" "$target" || fail 'Cannot atomically replace the executable.'
+    fi
+    [ -f "$target" ] && [ ! -L "$target" ] || fail 'Destination changed during installation; inspect it before retrying.'
     staging_file=''
     printf 'Installed Docket (%s) to %s\n' "$version" "$target"
     case ":${PATH:-}:" in *":$install_directory:"*) ;; *) printf 'Add %s to your PATH.\n' "$install_directory" ;; esac

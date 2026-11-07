@@ -22,7 +22,11 @@ FROM toolchain AS test
 RUN go test -race -count=1 -timeout=90s ./... && go vet ./...
 
 FROM toolchain AS build
-RUN go build -trimpath -tags 'netgo osusergo sqlite_omit_load_extension' -ldflags '-s -w -linkmode external -extldflags "-static"' -o /build/docket ./cmd/docket
+ARG BUILD_VERSION=dev
+RUN if [ "$BUILD_VERSION" != dev ]; then \
+      test "${#BUILD_VERSION}" -le 64 && printf '%s\n' "$BUILD_VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || exit 1; \
+    fi \
+    && go build -trimpath -tags 'netgo osusergo sqlite_omit_load_extension' -ldflags "-s -w -X main.buildVersion=$BUILD_VERSION -linkmode external -extldflags \"-static\"" -o /build/docket ./cmd/docket
 
 FROM build AS security
 RUN GOBIN=/audit go install golang.org/x/vuln/cmd/govulncheck@v1.9.0 \

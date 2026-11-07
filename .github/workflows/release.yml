@@ -21,7 +21,15 @@ concurrency:
 jobs:
   build:
     if: github.repository == 'dastagirS/docket'
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            asset: docket-linux-amd64
+          - runner: macos-15
+            asset: docket-darwin-arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     outputs:
       tag: ${{ steps.source.outputs.tag }}
@@ -67,25 +75,72 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        if: runner.os == 'macOS'
+        with:
+          go-version-file: go.mod
+          architecture: arm64
+      - name: Native Apple Silicon frontend and Go checks
+        if: runner.os == 'macOS'
+        env:
+          CGO_ENABLED: '1'
+          GOOS: darwin
+          GOARCH: arm64
+          GOTOOLCHAIN: local
+          MACOSX_DEPLOYMENT_TARGET: '14.0'
+        run: |
+          test "$(uname -s)/$(uname -m)" = Darwin/arm64
+          npm --prefix frontend ci --no-audit --no-fund
+          npm --prefix frontend run build
+          go test -race -count=1 -timeout=120s ./...
+          go vet ./...
+      - name: Build and ad-hoc sign Apple Silicon executable
+        if: runner.os == 'macOS'
+        env:
+          BUILD_VERSION: ${{ steps.source.outputs.tag }}
+          CGO_ENABLED: '1'
+          GOOS: darwin
+          GOARCH: arm64
+          GOTOOLCHAIN: local
+          MACOSX_DEPLOYMENT_TARGET: '14.0'
+        run: |
+          mkdir "$RUNNER_TEMP/docket-build"
+          go build -trimpath -tags 'netgo osusergo sqlite_omit_load_extension' -ldflags "-s -w -X main.buildVersion=$BUILD_VERSION" -o "$RUNNER_TEMP/docket-build/docket" ./cmd/docket
+          codesign --force --sign - --timestamp=none "$RUNNER_TEMP/docket-build/docket"
+          codesign --verify --strict "$RUNNER_TEMP/docket-build/docket"
+      - name: Native macOS vulnerability checks
+        if: runner.os == 'macOS'
+        run: |
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -scan=package -test -tags 'netgo,osusergo,sqlite_omit_load_extension' ./...
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -mode=binary "$RUNNER_TEMP/docket-build/docket"
       - name: Go tests, race detection, vet, and frontend type checks
+        if: runner.os == 'Linux'
         run: make test
       - name: Go vulnerability scans
+        if: runner.os == 'Linux'
         run: make security
       - name: Baseline CPU and SQLite portability checks
+        if: runner.os == 'Linux'
         run: make verify-portable
       - name: Build isolated release executable
+        if: runner.os == 'Linux'
+        env:
+          BUILD_VERSION: ${{ steps.source.outputs.tag }}
         run: make build BUILD_DIRECTORY="$RUNNER_TEMP/docket-build"
       - name: Real CLI and embedded-skill checks
         env:
           DOCKET_BINARY: ${{ runner.temp }}/docket-build/docket
+          DOCKET_EXPECTED_BUILD_VERSION: ${{ steps.source.outputs.tag }}
         run: node --test tests/cli.test.mjs tests/skill.test.mjs tests/install.test.mjs tests/workflow.test.mjs
       - name: Package release assets
         env:
           RELEASE_TAG: ${{ steps.source.outputs.tag }}
-        run: sh scripts/package-release.sh "$RELEASE_TAG" "$RUNNER_TEMP/docket-build/docket" "$RUNNER_TEMP/docket-release"
+        run: |
+          sh scripts/package-release.sh "$RELEASE_TAG" "$RUNNER_TEMP/docket-build/docket" "$RUNNER_TEMP/docket-release"
+          printf '%s\n' '${{ steps.source.outputs.commit }}' > "$RUNNER_TEMP/docket-release/SOURCE_COMMIT"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: release-assets
+          name: release-${{ matrix.asset }}
           path: ${{ runner.temp }}/docket-release/*
           if-no-files-found: error
           retention-days: 7
@@ -99,8 +154,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
-          name: release-assets
+          pattern: release-docket-*
           path: release-assets
+          merge-multiple: false
       - name: Verify artifacts and publish through a draft
         env:
           GH_TOKEN: ${{ github.token }}
@@ -178,15 +234,19 @@ jobs:
               if len(tag) > tag_bytes_max or not re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag):
                   raise ValueError('Release tag must be a stable vMAJOR.MINOR.PATCH version')
               artifacts = {}
-              for name, bytes_max in [('docket-linux-amd64', 64 * 1024 * 1024), ('SHA256SUMS', 16 * 1024)]:
-                  artifacts[name] = read_artifact(name, bytes_max)
-              expected_manifest = (artifacts['docket-linux-amd64'][1] + '  docket-linux-amd64\n').encode()
-              if artifacts['SHA256SUMS'][0] != expected_manifest:
-                  # Tagged source may package an installer; verify its manifest entry without publishing that file.
-                  installer_digest = read_artifact('install.sh', 1024 * 1024)[1]
-                  tagged_manifest = expected_manifest + (installer_digest + '  install.sh\n').encode()
-                  if artifacts['SHA256SUMS'][0] != tagged_manifest:
-                      raise ValueError('Release checksum manifest does not match the packaged files')
+              manifest_rows = []
+              for name in ('docket-linux-amd64', 'docket-darwin-arm64'):
+                  prefix = 'release-' + name + '/'
+                  commit = read_artifact(prefix + 'SOURCE_COMMIT', 128)[0]
+                  if commit != (source_commit + '\n').encode():
+                      raise ValueError('Platform artifacts were built from different commits')
+                  artifacts[name] = read_artifact(prefix + name, 64 * 1024 * 1024)
+                  row = artifacts[name][1] + '  ' + name + '\n'
+                  if read_artifact(prefix + 'SHA256SUMS', 16 * 1024)[0] != row.encode():
+                      raise ValueError('Platform checksum does not match its executable')
+                  manifest_rows.append(row)
+              manifest = ''.join(manifest_rows).encode()
+              artifacts['SHA256SUMS'] = (manifest, hashlib.sha256(manifest).hexdigest())
               check_tag()
               try:
                   release = request('GET', '/releases/tags/' + tag)
@@ -246,7 +306,7 @@ jobs:
                   if len(matching) != 1:
                       raise RuntimeError('Published release is missing a unique asset: ' + name)
                   check_asset(matching[0], name)
-              print('Verified published release ' + tag + ': docket-linux-amd64, SHA256SUMS')
+              print('Verified published release ' + tag + ': docket-linux-amd64, docket-darwin-arm64, SHA256SUMS')
           except Exception as error:
               if isinstance(error, urllib.error.HTTPError):
                   error.close()

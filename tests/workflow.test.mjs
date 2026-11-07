@@ -65,6 +65,8 @@ test("manual release checks out the validated tag and retains all pre-publicatio
   assert.match(workflow,/RELEASE_TAG: \$\{\{ steps\.version\.outputs\.tag \}\}/);
   assert.match(workflow,/group: release-\$\{\{ inputs\.tag \|\| github\.ref_name \}\}/);
   for(const command of ["make test","make security","make verify-portable","tests/cli.test.mjs","tests/skill.test.mjs","tests/install.test.mjs","tests/workflow.test.mjs"]) assert.ok(workflow.includes(command),`Missing gate: ${command}`);
+  assert.match(workflow,/BUILD_VERSION: \$\{\{ steps\.source\.outputs\.tag \}\}/);
+  assert.match(workflow,/DOCKET_EXPECTED_BUILD_VERSION: \$\{\{ steps\.source\.outputs\.tag \}\}/);
   assert.match(workflow,/needs: build/);
   assert.match(workflow,/current\['id'\] != release_identifier/);
 });
@@ -76,7 +78,7 @@ const otherDraftIdentifier = 202;
 const createdReleaseIdentifier = 303;
 const sourceCommit = "1".repeat(commitHexLength);
 const releaseTag = "v0.0.1";
-const assetNames = ["docket-linux-amd64", "SHA256SUMS"];
+const assetNames = ["docket-linux-amd64", "docket-darwin-arm64", "SHA256SUMS"];
 const publisherTimeoutMs = 10000;
 const testTimeoutMs = 30000;
 const requestBytesMax = 1048576;
@@ -88,14 +90,13 @@ async function verifyPublication(scenario, callback) {
   const requests = [];
   let tagLookups = 0;
   const releases = new Map();
-  const payloads = new Map([[assetNames[0], Buffer.from("fixture executable")]]);
+  const payloads = new Map([[assetNames[0], Buffer.from("fixture executable")], [assetNames[1], Buffer.from("fixture macOS executable")]]);
   payloads.set("SHA256SUMS", Buffer.from([...payloads].map(([name, value]) => `${checksum(value)}  ${name}\n`).join("")));
-  const taggedInstaller = Buffer.from("#!/bin/sh\nexit 0\n");
-  if (scenario.endsWith("tagged-installer")) payloads.set("SHA256SUMS", Buffer.concat([payloads.get("SHA256SUMS"), Buffer.from(`${checksum(taggedInstaller)}  install.sh\n`)]));
   const asset = (name, value) => ({ name, size: value.length, state: "uploaded", digest: `sha256:${checksum(value)}` });
   if (!scenario.startsWith("new")) releases.set(publicReleaseIdentifier, { id: publicReleaseIdentifier, tag_name: releaseTag, draft: ["draft", "wrong-public-release", "ambiguous-draft"].includes(scenario), body: "Maintainer's release notes", assets: [] });
   // A same-tag draft must not intercept repairs to the already-published release.
   releases.set(otherDraftIdentifier, { id: otherDraftIdentifier, tag_name: ["existing", "partial", "matching", "conflict", "ambiguous-draft"].includes(scenario) ? releaseTag : "v9.9.9", draft: true, assets: [], body: "Unrelated draft" });
+  const taggedInstaller = Buffer.from("#!/bin/sh\nexit 0\n");
   if (scenario === "tagged-installer") releases.get(publicReleaseIdentifier).assets = [...payloads, ["install.sh", taggedInstaller]].map(([name, value]) => asset(name, value));
   if (scenario === "partial") releases.get(publicReleaseIdentifier).assets = [asset(assetNames[0], payloads.get(assetNames[0]))];
   if (scenario === "matching") releases.get(publicReleaseIdentifier).assets = [...payloads].map(([name, value]) => asset(name, value));
@@ -170,8 +171,15 @@ async function verifyPublication(scenario, callback) {
   server.maxConnections = 4;
   try {
     await mkdir(join(directory, "release-assets"));
-    for (const [name, payload] of payloads) await writeFile(join(directory, "release-assets", name), payload);
-    if (scenario.endsWith("tagged-installer")) await writeFile(join(directory, "release-assets", "install.sh"), taggedInstaller);
+    for (const name of assetNames.slice(0, -1)) {
+      const folder = join(directory, "release-assets", `release-${name}`);
+      await mkdir(folder);
+      await writeFile(join(folder, name), payloads.get(name));
+      await writeFile(join(folder, "SHA256SUMS"), `${checksum(payloads.get(name))}  ${name}\n`);
+      await writeFile(join(folder, "SOURCE_COMMIT"), `${scenario === "artifact-commit" && name === "docket-darwin-arm64" ? "2".repeat(commitHexLength) : sourceCommit}\n`);
+      if (scenario.endsWith("tagged-installer")) await writeFile(join(folder, "install.sh"), taggedInstaller);
+      if (scenario === "artifact-corrupt" && name === "docket-darwin-arm64") await writeFile(join(folder, name), "different artifact");
+    }
     server.listen(0, "127.0.0.1"); await once(server, "listening");
     const origin = `http://127.0.0.1:${server.address().port}`;
     const start = workflow.indexOf("      - name: Verify artifacts and publish through a draft\n");
@@ -240,14 +248,29 @@ test("publisher refuses ambiguous drafts, failed listings, or incomplete bounded
 });
 
 
+
+test("release workflow requires native Linux and Apple Silicon assets before publication", () => {
+  assert.match(workflow, /runner: ubuntu-24\.04/);
+  assert.match(workflow, /runner: macos-15/);
+  assert.match(workflow, /asset: docket-darwin-arm64/);
+  assert.match(workflow, /codesign --verify --strict/);
+  assert.match(workflow, /SOURCE_COMMIT/);
+  assert.match(workflow, /merge-multiple: false/);
+});
+
 test("publisher ignores surplus installer artifacts and leaves existing release files untouched", { timeout: testTimeoutMs }, async () => {
   for (const scenario of ["tagged-installer", "new-tagged-installer"]) await verifyPublication(scenario, async ({ code, releases, requests }) => {
     assert.equal(code, 0);
     if (scenario === "tagged-installer") {
       assert.ok(requests.every(request => request.method === "GET"));
       assert.ok(releases.get(publicReleaseIdentifier).assets.some(asset => asset.name === "install.sh"));
-    } else {
-      assert.deepEqual(releases.get(createdReleaseIdentifier).assets.map(asset => asset.name).sort(), [...assetNames].sort());
-    }
+    } else assert.deepEqual(releases.get(createdReleaseIdentifier).assets.map(asset => asset.name).sort(), [...assetNames].sort());
+  });
+});
+
+test("publisher rejects mixed-commit or corrupt platform artifacts before contacting GitHub", { timeout: testTimeoutMs }, async () => {
+  for (const scenario of ["artifact-commit", "artifact-corrupt"]) await verifyPublication(scenario, async ({ code, requests }) => {
+    assert.equal(code, 1);
+    assert.deepEqual(requests, []);
   });
 });

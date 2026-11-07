@@ -6,7 +6,7 @@ For everyday commands, see [CLI](CLI.md). For release automation and installatio
 
 ## Run the service
 
-Requires Docker/BuildKit and Make to build. Pinned builders supply Node 24, Go 1.27.3, and the C compiler; no host Node/Go/compiler installation is needed. The output is a baseline Linux amd64 executable, verified under QEMU's `qemu64` CPU model. ARM64, Windows, and macOS need separate builds and are not shipped here.
+Requires Docker/BuildKit and Make to build. Pinned builders supply Node 24, Go 1.27.3, and the C compiler; no host Node/Go/compiler installation is needed. The output is a baseline Linux amd64 executable, verified under QEMU's `qemu64` CPU model. This Docker target builds Linux x86-64. Releases also include a native Apple Silicon macOS artifact; Intel macOS, Linux ARM64, and Windows are not shipped.
 
 ```sh
 make build
@@ -68,6 +68,21 @@ make build                      # Docker builds frontend, then embeds it in Go
 ```
 
 `internal/docket/web/` is generated output, not source; do not edit it. Docker builds it from the lockfile even when that directory is absent. For a direct host Go build, run `make frontend-build` first. The final executable still needs neither Node nor a separate frontend server.
+
+## Native Apple Silicon build
+
+Requires Apple Silicon macOS, Go 1.27.3, Node 24, and Xcode command-line tools for SQLite CGO. Build dependencies are not runtime dependencies. CI uses the native `macos-15` ARM64 runner with deployment target macOS 14.
+
+```sh
+npm --prefix frontend ci
+npm --prefix frontend run build
+CGO_ENABLED=1 MACOSX_DEPLOYMENT_TARGET=14.0 go build -trimpath \
+  -tags 'netgo osusergo sqlite_omit_load_extension' -o docket ./cmd/docket
+codesign --force --sign - --timestamp=none docket
+./docket version                    # dev for an unstamped local build
+```
+
+Release CI stamps `main.buildVersion` with the stable tag and verifies the ad-hoc signature. This is not Developer ID signing or notarization. `docket update` selects the current platform, verifies the downloaded executable, and never restarts a service.
 
 ## Docker
 

@@ -1,10 +1,11 @@
 BUILD_DIRECTORY ?= bin
+BUILD_VERSION ?= dev
 PREFIX ?= $(HOME)/.local
 
 .PHONY: build test test-browser frontend-build frontend-dev verify-portable vet security run test-cli test-install install
 
 build:
-	docker build --platform linux/amd64 --target artifact --output type=local,dest="$(BUILD_DIRECTORY)" .
+	docker build --platform linux/amd64 --target artifact --build-arg BUILD_VERSION="$(BUILD_VERSION)" --output type=local,dest="$(BUILD_DIRECTORY)" .
 
 test:
 	docker build --platform linux/amd64 --target test .
