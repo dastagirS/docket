@@ -44,12 +44,19 @@ Release builds receive `BUILD_VERSION` from the validated release tag, passed th
 
 ## Publish a release
 
-The workflow runs for `v*` tag pushes or manually through **Actions → Release → Run workflow** in `dastagirS/docket`. It requires an existing stable `vMAJOR.MINOR.PATCH` tag and never creates one. The manual form takes a required `tag`; it builds that exact tag, not the branch selected for the workflow. The first two-platform release must use a new unused tag containing the updater, version stamping, and macOS support. Leave `v0.0.1` unchanged; this workflow does not repair older Linux-only tags. Once reviewed changes are committed and pushed, an authorized maintainer can deliberately publish a new unused version:
+Use the release helper from a clean, committed `master` checkout. It needs Git and Node 24+, the existing frontend build tool—not new runtime dependencies for Docket.
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+./scripts/release.sh          # next patch version
+./scripts/release.sh minor    # next minor version
+./scripts/release.sh major    # next major version
 ```
+
+The helper finds the highest stable `vMAJOR.MINOR.PATCH` tag across local Git and `origin`, including tags whose CI builds failed. It previews the next version and exact commit, then asks for confirmation (default: no). Versions are stamped from the tag by CI; no version files or commits are generated. Origin must be this Docket repository, with matching fetch/push URLs, including their resolved destinations after Git URL rewrites. The helper refuses dirty or detached checkouts, other branches, unfinished Git operations, and a remote master not contained in the local commit.
+
+After confirmation it rechecks the checkout and origin, creates an annotated tag, and pushes the pinned commit and tag **atomically**. There is no force-push, automatic retry, non-atomic fallback, tag overwrite, or tag deletion. If a push cannot be confirmed, the new local tag is retained and the helper reports the uncertainty: inspect origin and Actions before rerunning. Failed local tags also reserve their version. An accepted push starts CI; it does not mean the release has passed or been published. Remote Git operations have a 60-second timeout, confirmation two minutes, and the whole command ten minutes; interruption can leave an uncertain push outcome.
+
+The workflow runs automatically for `v*` tag pushes, or manually through **Actions → Release → Run workflow** in `dastagirS/docket` for an existing tag. The helper creates the tag; the workflow does not. A new two-platform release must tag source containing the updater, version stamping, and macOS support. Leave earlier tags unchanged; the current workflow does not repair older Linux-only tags.
 
 Alternatively, once the tag exists on GitHub, use **Run workflow** and enter that tag. The workflow file must be present on the repository’s default branch for GitHub to show the manual button; keep the selected workflow branch at that default. Automatic/manual runs for the same tag share a concurrency group. These are publishing instructions, not part of the installer or local test targets.
 
@@ -71,8 +78,10 @@ From the repository root, use an output directory separate from any running serv
 build_directory=$(mktemp -d /tmp/docket-release-check-XXXXXXXX)
 make test
 make test-install BUILD_DIRECTORY="$build_directory"
-DOCKET_BINARY="$build_directory/docket" node --test tests/cli.test.mjs tests/skill.test.mjs
+DOCKET_BINARY="$build_directory/docket" node --test tests/cli.test.mjs tests/skill.test.mjs tests/release.test.mjs
 sh scripts/package-release.sh v0.1.0 "$build_directory/docket" "$build_directory/release"
 ```
 
 Installer tests use temporary HOME/destinations, the real built executable, and a local HTTP fixture behind a test-only curl transport rewrite. They verify checksum/error/size/redirect behavior and atomic replacement, not GitHub authentication, TLS interoperability, or hosted workflow execution. No installed CLI, existing service, project binding, or live database is modified.
+
+Release-helper tests use disposable local bare repositories with Git restricted to the file transport. They cover version selection, confirmation, stale previews, atomic rejection, unrelated-tag exclusion, and lost/uncertain push results. They do not push to GitHub or certify GitHub permissions and hosted execution.

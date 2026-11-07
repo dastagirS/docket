@@ -64,7 +64,7 @@ test("manual release checks out the validated tag and retains all pre-publicatio
   assert.match(workflow,/ref: refs\/tags\/\$\{\{ steps\.version\.outputs\.tag \}\}/);
   assert.match(workflow,/RELEASE_TAG: \$\{\{ steps\.version\.outputs\.tag \}\}/);
   assert.match(workflow,/group: release-\$\{\{ inputs\.tag \|\| github\.ref_name \}\}/);
-  for(const command of ["make test","make security","make verify-portable","tests/cli.test.mjs","tests/skill.test.mjs","tests/install.test.mjs","tests/workflow.test.mjs"]) assert.ok(workflow.includes(command),`Missing gate: ${command}`);
+  for(const command of ["make test","make security","make verify-portable","tests/cli.test.mjs","tests/skill.test.mjs","tests/install.test.mjs","tests/workflow.test.mjs","tests/release.test.mjs"]) assert.ok(workflow.includes(command),`Missing gate: ${command}`);
   assert.match(workflow,/BUILD_VERSION: \$\{\{ steps\.source\.outputs\.tag \}\}/);
   assert.match(workflow,/DOCKET_EXPECTED_BUILD_VERSION: \$\{\{ steps\.source\.outputs\.tag \}\}/);
   assert.match(workflow,/needs: build/);

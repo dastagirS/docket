@@ -131,7 +131,7 @@ jobs:
         env:
           DOCKET_BINARY: ${{ runner.temp }}/docket-build/docket
           DOCKET_EXPECTED_BUILD_VERSION: ${{ steps.source.outputs.tag }}
-        run: node --test tests/cli.test.mjs tests/skill.test.mjs tests/install.test.mjs tests/workflow.test.mjs
+        run: node --test tests/cli.test.mjs tests/skill.test.mjs tests/install.test.mjs tests/workflow.test.mjs tests/release.test.mjs
       - name: Package release assets
         env:
           RELEASE_TAG: ${{ steps.source.outputs.tag }}
