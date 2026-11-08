@@ -53,6 +53,9 @@ func TestCLIInitNonTerminalCharacterInputRequiresExplicitChoice(t *testing.T) {
 	if !json.Valid(diagnostics.Bytes()) || output.Len() != 0 {
 		t.Fatalf("Non-terminal character input must not produce interactive prompts: %s", diagnostics.String())
 	}
+	if !strings.Contains(diagnostics.String(), "--on-existing") {
+		t.Fatalf("Expected explicit repeat-init choice, not a terminal inspection failure: %s", diagnostics.String())
+	}
 }
 
 func TestCLIInitHelpIsOfflineAndReportsOutputFailure(t *testing.T) {

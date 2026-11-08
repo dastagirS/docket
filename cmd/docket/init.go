@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -88,7 +89,8 @@ func terminalInput(input io.Reader) (bool, error) {
 	}); err != nil {
 		return false, errors.New("Cannot inspect initialization terminal")
 	}
-	if status == syscall.ENOTTY {
+	// Darwin's /dev/null driver returns ENODEV for unsupported ioctls.
+	if status == syscall.ENOTTY || (runtime.GOOS == "darwin" && status == syscall.ENODEV) {
 		return false, nil
 	}
 	if status != 0 {
