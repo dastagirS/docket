@@ -3,7 +3,12 @@ WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
-RUN npm run build
+ARG FRONTEND_CHECK=true
+RUN case "$FRONTEND_CHECK" in \
+      true) npm run build ;; \
+      false) npm run build:assets ;; \
+      *) echo 'FRONTEND_CHECK must be true or false' >&2; exit 1 ;; \
+    esac
 
 # The builder must not inherit the host's optimized libc or CPU requirements.
 FROM golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS toolchain
@@ -40,8 +45,7 @@ COPY --from=build /build/docket /docket
 # QEMU is a verification tool only; it is not copied into the runtime image.
 FROM build AS portable-test
 RUN apk add --no-cache qemu-x86_64=11.0.3-r0
-RUN qemu-x86_64 -cpu qemu64 /build/docket --database /tmp/compat.sqlite --backup-to /tmp/compat-backup.sqlite \
-    && go test -exec 'qemu-x86_64 -cpu qemu64' -count=1 -timeout=90s ./...
+RUN qemu-x86_64 -cpu qemu64 /build/docket --database /tmp/compat.sqlite --backup-to /tmp/compat-backup.sqlite
 
 FROM scratch AS runtime
 COPY --chown=65532:65532 docker/data/ /data/

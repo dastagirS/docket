@@ -69,6 +69,14 @@ func terminalInput(input io.Reader) (bool, error) {
 	if !ok {
 		return false, nil
 	}
+	information, err := file.Stat()
+	if err != nil {
+		return false, errors.New("Cannot inspect initialization input")
+	}
+	// Darwin sockets need not return ENOTTY from terminal ioctls.
+	if information.Mode()&os.ModeCharDevice == 0 {
+		return false, nil
+	}
 	connection, err := file.SyscallConn()
 	if err != nil {
 		return false, errors.New("Cannot inspect initialization input")

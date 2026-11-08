@@ -11,6 +11,8 @@ import { createHash } from "node:crypto";
 
 const execute = promisify(execFile);
 const workflow = await readFile(".github/workflows/release.yml","utf8");
+const checksWorkflow = await readFile(".github/workflows/checks.yml", "utf8");
+const validationWorkflow = await readFile(".github/workflows/validation.yml", "utf8");
 const commandTimeoutMs = 5000;
 const outputBytesMax = 65536;
 
@@ -60,19 +62,67 @@ test("release workflow executes safe tag selection for manual and tag-push event
   } finally { await rm(directory,{recursive:true,force:true}); }
 });
 
-test("manual release checks out the validated tag and retains all pre-publication gates", () => {
-  assert.match(workflow,/ref: refs\/tags\/\$\{\{ steps\.version\.outputs\.tag \}\}/);
-  assert.match(workflow,/RELEASE_TAG: \$\{\{ steps\.version\.outputs\.tag \}\}/);
-  assert.match(workflow,/group: release-\$\{\{ inputs\.tag \|\| github\.ref_name \}\}/);
-  for(const command of ["make test","make --jobs=1 build security verify-portable","tests/cli.test.mjs","tests/skill.test.mjs","tests/install.test.mjs","tests/workflow.test.mjs","tests/release.test.mjs"]) assert.ok(workflow.includes(command),`Missing gate: ${command}`);
-  assert.match(workflow,/BUILD_VERSION: \$\{\{ steps\.version\.outputs\.tag \}\}/);
-  assert.match(workflow,/DOCKET_EXPECTED_BUILD_VERSION: \$\{\{ steps\.version\.outputs\.tag \}\}/);
-  assert.match(workflow,/commit: \$\{\{ steps\.checkout\.outputs\.commit \}\}/);
-  assert.match(workflow,/uses: actions\/checkout@[a-f0-9]{40}[^\n]*\n        id: checkout\n/);
-  assert.match(workflow,/fail-fast: true/);
-  assert.doesNotMatch(workflow,/steps\.source\.|Record checked-out source/);
-  assert.match(workflow,/needs: build/);
-  assert.match(workflow,/current\['id'\] != release_identifier/);
+test("release gates the exact tag commit before starting native builds", () => {
+  assert.match(workflow, /  validation:\n    if: github\.repository == 'dastagirS\/docket'/);
+  assert.match(workflow, /permissions:\n      contents: read\n      actions: read/);
+  assert.match(workflow, /ref: refs\/tags\/\$\{\{ steps\.version\.outputs\.tag \}\}/);
+  assert.match(workflow, /  build:\n    needs: validation\n    uses: \.\/\.github\/workflows\/checks\.yml\n    with:\n      tag: \$\{\{ needs\.validation\.outputs\.tag \}\}\n      commit: \$\{\{ needs\.validation\.outputs\.commit \}\}\n      upload_release_assets: true/);
+  assert.match(checksWorkflow, /ref: \$\{\{ inputs\.commit \|\| github\.sha \}\}/);
+  assert.match(workflow, /RELEASE_TAG: \$\{\{ needs\.build\.outputs\.tag \}\}/);
+  assert.match(workflow, /SOURCE_COMMIT: \$\{\{ needs\.build\.outputs\.commit \}\}/);
+  assert.match(workflow, /group: release-\$\{\{ inputs\.tag \|\| github\.ref_name \}\}/);
+  assert.match(checksWorkflow, /BUILD_VERSION: \$\{\{ inputs\.tag \|\| 'dev' \}\}/);
+  assert.match(checksWorkflow, /DOCKET_EXPECTED_BUILD_VERSION: \$\{\{ inputs\.tag \|\| 'dev' \}\}/);
+  assert.match(checksWorkflow, /tag:\n        value: \$\{\{ jobs\.build\.outputs\.tag \}\}/);
+  assert.match(checksWorkflow, /commit:\n        value: \$\{\{ jobs\.build\.outputs\.commit \}\}/);
+  assert.match(checksWorkflow, /commit: \$\{\{ steps\.checkout\.outputs\.commit \}\}/);
+  assert.match(checksWorkflow, /fail-fast: true/);
+  assert.match(workflow, /needs: build/);
+  assert.match(workflow, /current\['id'\] != release_identifier/);
+});
+
+test("push checks remain required but release builds do not rerun them", async () => {
+  for (const [name, operatingSystem] of [
+    ["Native Apple Silicon Go checks", "macOS"],
+    ["Native macOS vulnerability checks", "macOS"],
+    ["Go tests, race detection, vet, and frontend type checks", "Linux"],
+    ["Build and verify Linux validation executable", "Linux"],
+  ]) assert.ok(checksWorkflow.includes(`      - name: ${name}\n        if: runner.os == '${operatingSystem}' && !inputs.upload_release_assets\n`), `${name} must run on pushes only`);
+  assert.ok(checksWorkflow.includes("      - name: Real CLI and embedded-skill checks\n        if: ${{ !inputs.upload_release_assets }}\n"));
+  for (const command of ["make test", "make --jobs=1 build security verify-portable", "tests/cli.test.mjs", "tests/skill.test.mjs", "tests/install.test.mjs", "tests/workflow.test.mjs", "tests/release.test.mjs"]) assert.ok(checksWorkflow.includes(command), `Missing push gate: ${command}`);
+  assert.match(checksWorkflow, /RUN_CHECKS: \$\{\{ !inputs\.upload_release_assets \}\}/);
+  assert.match(checksWorkflow, /npm --prefix frontend run build:assets/);
+  assert.equal(JSON.parse(await readFile("frontend/package.json", "utf8")).scripts["build:assets"], "vite build");
+  assert.match(checksWorkflow, /cache: npm\n          cache-dependency-path: frontend\/package-lock\.json/);
+  assert.match(checksWorkflow, /if: runner.os == 'Linux' && inputs\.upload_release_assets[\s\S]*?run: make build FRONTEND_CHECK=false/);
+  const { stdout } = await execute("make", ["--dry-run", "build", "BUILD_VERSION=v0.0.4", "FRONTEND_CHECK=false", "BUILD_DIRECTORY=release-command-proof"], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax });
+  assert.match(stdout, /--target artifact/);
+  assert.match(stdout, /--build-arg FRONTEND_CHECK="false"/);
+  assert.doesNotMatch(stdout, /--target (?:test|security|portable-test)/);
+  const dockerfile = await readFile("Dockerfile", "utf8");
+  assert.match(dockerfile, /false\) npm run build:assets/);
+  assert.match(dockerfile, /qemu-x86_64 -cpu qemu64 \/build\/docket[^\n]*--backup-to/);
+  assert.doesNotMatch(dockerfile, /go test -exec.*qemu/);
+});
+
+test("validation checks every branch push read-only, cancels stale runs, and never opts into release assets", () => {
+  assert.match(validationWorkflow, /'on':\n  push:\n    branches:\n      - '\*\*'/);
+  assert.doesNotMatch(validationWorkflow, /\b(?:tags|pull_request|workflow_dispatch):/);
+  assert.match(validationWorkflow, /permissions:\n  contents: read/);
+  assert.match(validationWorkflow, /if: github\.event\.deleted != true/);
+  assert.match(validationWorkflow, /group: validation-\$\{\{ github\.ref \}\}\n  cancel-in-progress: true/);
+  assert.match(validationWorkflow, /uses: \.\/\.github\/workflows\/checks\.yml\n    with:\n      upload_release_assets: false/);
+  assert.doesNotMatch(validationWorkflow, /\bpublish:|contents: write|secrets:|upload-artifact@/);
+  assert.match(checksWorkflow, /workflow_call:/);
+  assert.match(checksWorkflow, /upload_release_assets:\n        description:[^\n]*\n        type: boolean\n        default: false/);
+  assert.match(checksWorkflow, /permissions:\n  contents: read/);
+  assert.doesNotMatch(checksWorkflow, /contents: write|GH_TOKEN|secrets:/);
+  for (const step of ["Package release assets"]) {
+    assert.ok(checksWorkflow.includes(`      - name: ${step}\n        if: inputs.upload_release_assets\n`), `${step} must be release-only`);
+  }
+  assert.match(checksWorkflow, /- if: inputs\.upload_release_assets\n        uses: actions\/upload-artifact@[a-f0-9]{40}/);
+  assert.match(checksWorkflow, /persist-credentials: false/);
+  assert.match(checksWorkflow, /timeout-minutes: 30/);
 });
 
 test("Linux release build, security, and portability share the selected version", { timeout: 15000 }, async () => {
@@ -84,6 +134,105 @@ test("Linux release build, security, and portability share the selected version"
 });
 
 const commitHexLength = 40;
+const gateRequestsMax = 2;
+const gateResponseBytesMax = 1024 * 1024;
+
+async function verifyValidationGate(scenario) {
+  const commit = "1".repeat(commitHexLength);
+  const attempt = 2;
+  const run = { id: 101, run_attempt: attempt, head_sha: commit, path: ".github/workflows/validation.yml", event: "push", head_repository: { full_name: "dastagirS/docket" }, status: "completed", conclusion: "success" };
+  const required = [
+    ["docket-linux-amd64", ["Go tests, race detection, vet, and frontend type checks", "Build and verify Linux validation executable", "Real CLI and embedded-skill checks"]],
+    ["docket-darwin-arm64", ["Native Apple Silicon Go checks", "Native macOS vulnerability checks", "Real CLI and embedded-skill checks"]],
+  ];
+  const jobs = required.map(([name, names]) => ({ name: `checks / ${name}`, head_sha: commit, run_attempt: attempt, status: "completed", conclusion: "success", steps: names.map(name => ({ name, status: "completed", conclusion: "success" })) }));
+  for (const job of jobs) for (const step of job.steps) assert.ok(checksWorkflow.includes(`- name: ${step.name}\n`), "Gate fixture must match real workflow checks");
+  if (["failure", "cancelled", "skipped", "timed_out", "neutral"].includes(scenario)) run.conclusion = scenario;
+  if (["queued", "in_progress"].includes(scenario)) { run.status = scenario; run.conclusion = null; }
+  if (scenario === "latest-failed") run.conclusion = "failure";
+  if (scenario === "wrong-commit") run.head_sha = "2".repeat(commitHexLength);
+  if (scenario === "wrong-workflow") run.path = ".github/workflows/unrelated.yml";
+  if (scenario === "wrong-event") run.event = "pull_request";
+  if (scenario === "wrong-repository") run.head_repository.full_name = "other/repository";
+  if (scenario === "missing-native") jobs.pop();
+  if (scenario === "duplicate-native") jobs.push(jobs[0]);
+  if (scenario === "failed-native") jobs[0].conclusion = "failure";
+  if (scenario === "skipped-step") jobs[0].steps[0].conclusion = "skipped";
+  if (scenario === "missing-step") jobs[0].steps.shift();
+  if (scenario === "old-attempt") jobs[0].run_attempt = attempt - 1;
+  if (scenario === "wrong-job-commit") jobs[0].head_sha = "2".repeat(commitHexLength);
+  if (scenario === "no-jobs") jobs.length = 0;
+  const requests = [];
+  let fixtureError;
+  const server = createServer((request, response) => {
+    try {
+      assert.ok(requests.length < gateRequestsMax, "Gate must not retry or poll");
+      assert.equal(request.method, "GET");
+      assert.equal(request.headers.authorization, "Bearer fixture-token");
+      const url = new URL(request.url, "http://localhost");
+      requests.push(url.pathname);
+      if (scenario === "api-error") { response.writeHead(403); response.end(); return; }
+      if (scenario === "redirect") { response.writeHead(302, { Location: "/must-not-forward-token" }); response.end(); return; }
+      if (scenario === "oversized") { response.end(" ".repeat(gateResponseBytesMax + 1)); return; }
+      if (scenario === "invalid-json") { response.end("not JSON"); return; }
+      if (requests.length === 1) {
+        assert.equal(url.pathname, "/repos/dastagirS/docket/actions/workflows/validation.yml/runs");
+        assert.equal(url.searchParams.get("head_sha"), commit);
+        assert.equal(url.searchParams.get("event"), "push");
+        assert.equal(url.searchParams.get("per_page"), "1");
+        assert.equal(url.searchParams.has("status"), false, "Must not hide newer failed or pending runs by filtering for success");
+        response.end(JSON.stringify({ total_count: scenario === "missing" ? 0 : 2, workflow_runs: scenario === "missing" ? [] : [run] }));
+      } else {
+        assert.equal(url.pathname, `/repos/dastagirS/docket/actions/runs/${run.id}/attempts/${attempt}/jobs`);
+        assert.equal(url.searchParams.get("per_page"), "100");
+        response.end(JSON.stringify({ total_count: jobs.length + (scenario === "incomplete-jobs" ? 1 : 0), jobs }));
+      }
+    } catch (error) { fixtureError = error; response.writeHead(500); response.end(); }
+  });
+  server.requestTimeout = commandTimeoutMs;
+  server.headersTimeout = commandTimeoutMs;
+  server.maxConnections = 2;
+  try {
+    const listening = once(server, "listening", { signal: AbortSignal.timeout(commandTimeoutMs) });
+    server.listen(0, "127.0.0.1");
+    await listening;
+    const start = workflow.indexOf("      - name: Require successful push validation\n");
+    assert.notEqual(start, -1);
+    const match = workflow.slice(start).match(/        run: \|\n((?:(?:          [^\n]*)?\n)+)/);
+    assert.ok(match, "Cannot locate the real validation gate script");
+    const script = match[1].replace(/^          /gm, "").replaceAll("https://api.github.com", `http://127.0.0.1:${server.address().port}`);
+    let result;
+    try {
+      result = { code: 0, ...await execute("bash", ["-e", "-o", "pipefail", "-c", script], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax, env: { ...process.env, GH_REPO: "dastagirS/docket", GH_TOKEN: "fixture-token", SOURCE_COMMIT: commit } }) };
+    } catch (error) {
+      if (typeof error.code !== "number") throw error;
+      result = error;
+    }
+    if (fixtureError) throw fixtureError;
+    assert.doesNotMatch(result.stdout + result.stderr, /fixture-token/);
+    return { ...result, requests };
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+}
+
+test("release gate accepts only successful native checks for the exact commit and attempt", { timeout: 30000 }, async () => {
+  const result = await verifyValidationGate("success");
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.requests.length, gateRequestsMax);
+  assert.match(result.stdout, /successful push validation/);
+});
+
+test("release gate refuses missing, failed, pending, skipped, mismatched or unreadable checks without retries", { timeout: 30000 }, async () => {
+  for (const scenario of ["missing", "failure", "cancelled", "skipped", "timed_out", "neutral", "queued", "in_progress", "latest-failed", "wrong-commit", "wrong-workflow", "wrong-event", "wrong-repository", "missing-native", "duplicate-native", "failed-native", "skipped-step", "missing-step", "old-attempt", "wrong-job-commit", "no-jobs", "incomplete-jobs", "api-error", "redirect", "oversized", "invalid-json"]) {
+    const result = await verifyValidationGate(scenario);
+    assert.equal(result.code, 1, scenario);
+    assert.match(result.stderr, /Release blocked:/, scenario);
+    assert.ok(result.requests.length <= gateRequestsMax, scenario);
+  }
+});
+
 const digestHexLength = 64;
 const publicReleaseIdentifier = 101;
 const otherDraftIdentifier = 202;
@@ -262,11 +411,11 @@ test("publisher refuses ambiguous drafts, failed listings, or incomplete bounded
 
 
 test("release workflow requires native Linux and Apple Silicon assets before publication", () => {
-  assert.match(workflow, /runner: ubuntu-24\.04/);
-  assert.match(workflow, /runner: macos-15/);
-  assert.match(workflow, /asset: docket-darwin-arm64/);
-  assert.match(workflow, /codesign --verify --strict/);
-  assert.match(workflow, /SOURCE_COMMIT/);
+  assert.match(checksWorkflow, /runner: ubuntu-24\.04/);
+  assert.match(checksWorkflow, /runner: macos-15/);
+  assert.match(checksWorkflow, /asset: docket-darwin-arm64/);
+  assert.match(checksWorkflow, /codesign --verify --strict/);
+  assert.match(checksWorkflow, /SOURCE_COMMIT/);
   assert.match(workflow, /merge-multiple: false/);
 });
 

@@ -114,14 +114,14 @@ See [API.md](API.md) for request examples, versions, events, and limits. Limits 
 
 ```sh
 make test                       # isolated Go tests with race detector + vet
-make verify-portable            # SQLite backup + API tests under baseline CPU emulation
+make verify-portable            # SQLite backup smoke check under baseline CPU emulation
 make test-install               # isolated installer/release checks
 make test-cli                   # isolated CLI process checks; existing Node required
 make test-browser               # optional: existing Node + agent-browser/Chromium required
 make security                   # pinned scanner: module, package, and final binary checks
 ```
 
-The Docker test/build stages run `svelte-check` before bundling. `npm --prefix frontend audit` checks the locked frontend dependency tree separately from `make security`'s Go scanner.
+Default Docker test/build stages run `svelte-check` before bundling. Gated release builds use `FRONTEND_CHECK=false` to bundle assets without repeating type checks already passed by that commit. `npm --prefix frontend audit` checks the locked frontend dependency tree separately from `make security`'s Go scanner.
 
 Browser tests launch disposable real servers and a uniquely named browser session. They never attach to an existing user browser. Set `DOCKET_SCREENSHOTS=/absolute/path` to retain desktop/phone screenshots. They also test process-kill recovery and backup restoration. No additional npm installation is required for browser tests after the Docker build.
 

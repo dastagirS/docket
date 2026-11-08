@@ -1,0 +1,20 @@
+name: Validation
+
+'on':
+  push:
+    branches:
+      - '**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    if: github.event.deleted != true
+    uses: ./.github/workflows/checks.yml
+    with:
+      upload_release_assets: false

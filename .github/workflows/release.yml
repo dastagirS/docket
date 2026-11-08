@@ -19,18 +19,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  validation:
     if: github.repository == 'dastagirS/docket'
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            asset: docket-linux-amd64
-          - runner: macos-15
-            asset: docket-darwin-arm64
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      actions: read
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       commit: ${{ steps.checkout.outputs.commit }}
@@ -65,72 +60,92 @@ jobs:
         with:
           ref: refs/tags/${{ steps.version.outputs.tag }}
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: '24'
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        if: runner.os == 'macOS'
-        with:
-          go-version-file: go.mod
-          architecture: arm64
-      - name: Native Apple Silicon frontend and Go checks
-        if: runner.os == 'macOS'
+      - name: Require successful push validation
         env:
-          CGO_ENABLED: '1'
-          GOOS: darwin
-          GOARCH: arm64
-          GOTOOLCHAIN: local
-          MACOSX_DEPLOYMENT_TARGET: '14.0'
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_COMMIT: ${{ steps.checkout.outputs.commit }}
+        shell: bash
         run: |
-          test "$(uname -s)/$(uname -m)" = Darwin/arm64
-          npm --prefix frontend ci --no-audit --no-fund
-          npm --prefix frontend run build
-          go test -race -count=1 -timeout=120s ./...
-          go vet ./...
-      - name: Build and ad-hoc sign Apple Silicon executable
-        if: runner.os == 'macOS'
-        env:
-          BUILD_VERSION: ${{ steps.version.outputs.tag }}
-          CGO_ENABLED: '1'
-          GOOS: darwin
-          GOARCH: arm64
-          GOTOOLCHAIN: local
-          MACOSX_DEPLOYMENT_TARGET: '14.0'
-        run: |
-          mkdir "$RUNNER_TEMP/docket-build"
-          go build -trimpath -tags 'netgo osusergo sqlite_omit_load_extension' -ldflags "-s -w -X main.buildVersion=$BUILD_VERSION" -o "$RUNNER_TEMP/docket-build/docket" ./cmd/docket
-          codesign --force --sign - --timestamp=none "$RUNNER_TEMP/docket-build/docket"
-          codesign --verify --strict "$RUNNER_TEMP/docket-build/docket"
-      - name: Native macOS vulnerability checks
-        if: runner.os == 'macOS'
-        run: |
-          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -scan=package -test -tags 'netgo,osusergo,sqlite_omit_load_extension' ./...
-          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -mode=binary "$RUNNER_TEMP/docket-build/docket"
-      - name: Go tests, race detection, vet, and frontend type checks
-        if: runner.os == 'Linux'
-        run: make test
-      - name: Build and verify Linux release
-        if: runner.os == 'Linux'
-        env:
-          BUILD_VERSION: ${{ steps.version.outputs.tag }}
-        run: make --jobs=1 build security verify-portable BUILD_DIRECTORY="$RUNNER_TEMP/docket-build"
-      - name: Real CLI and embedded-skill checks
-        env:
-          DOCKET_BINARY: ${{ runner.temp }}/docket-build/docket
-          DOCKET_EXPECTED_BUILD_VERSION: ${{ steps.version.outputs.tag }}
-        run: node --test tests/cli.test.mjs tests/skill.test.mjs tests/install.test.mjs tests/workflow.test.mjs tests/release.test.mjs
-      - name: Package release assets
-        env:
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          sh scripts/package-release.sh "$RELEASE_TAG" "$RUNNER_TEMP/docket-build/docket" "$RUNNER_TEMP/docket-release"
-          printf '%s\n' '${{ steps.checkout.outputs.commit }}' > "$RUNNER_TEMP/docket-release/SOURCE_COMMIT"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: release-${{ matrix.asset }}
-          path: ${{ runner.temp }}/docket-release/*
-          if-no-files-found: error
-          retention-days: 7
+          python3 - <<'PYTHON'
+          import json
+          import os
+          import re
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          class RefuseRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, file, code, message, headers, target):
+                  raise RuntimeError('Validation lookup refused a redirect')
+
+          def read_metadata(path):
+              request = urllib.request.Request('https://api.github.com/repos/' + repository + path, headers=headers)
+              with opener.open(request, timeout=request_timeout_seconds) as response:
+                  payload = response.read(response_bytes_max + 1)
+              if len(payload) > response_bytes_max:
+                  raise ValueError('Validation lookup exceeded its response limit')
+              return json.loads(payload)
+
+          try:
+              repository = os.environ['GH_REPO']
+              commit = os.environ['SOURCE_COMMIT']
+              if repository != 'dastagirS/docket' or not re.fullmatch(r'[0-9a-f]{40}', commit):
+                  raise ValueError('Invalid validation lookup identity')
+              query = urllib.parse.urlencode({'head_sha': commit, 'event': 'push', 'per_page': 1, 'exclude_pull_requests': 'true'})
+              headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
+              opener = urllib.request.build_opener(RefuseRedirect())
+              response_bytes_max = 1024 * 1024
+              request_timeout_seconds = 15
+              result = read_metadata('/actions/workflows/validation.yml/runs?' + query)
+              runs = result['workflow_runs']
+              if type(result['total_count']) is not int or result['total_count'] < 1 or not isinstance(runs, list) or len(runs) != 1:
+                  raise ValueError('No unambiguous push validation found for the release commit')
+              run = runs[0]
+              if run['head_sha'] != commit or run['path'] != '.github/workflows/validation.yml' or run['event'] != 'push' or run['head_repository']['full_name'] != repository:
+                  raise ValueError('Validation identity does not match the release commit')
+              if run['status'] != 'completed' or run['conclusion'] != 'success':
+                  raise ValueError('Latest push validation has not completed successfully')
+              if type(run['id']) is not int or run['id'] <= 0 or type(run['run_attempt']) is not int or run['run_attempt'] <= 0:
+                  raise ValueError('Validation run identity is invalid')
+              jobs_per_page = 100
+              result = read_metadata(f'/actions/runs/{run["id"]}/attempts/{run["run_attempt"]}/jobs?per_page={jobs_per_page}')
+              jobs = result['jobs']
+              if not isinstance(jobs, list) or len(jobs) > jobs_per_page or result['total_count'] != len(jobs):
+                  raise ValueError('Validation job lookup is incomplete')
+              required = {
+                  'docket-linux-amd64': {'Go tests, race detection, vet, and frontend type checks', 'Build and verify Linux validation executable', 'Real CLI and embedded-skill checks'},
+                  'docket-darwin-arm64': {'Native Apple Silicon Go checks', 'Native macOS vulnerability checks', 'Real CLI and embedded-skill checks'},
+              }
+              verified = set()
+              for job in jobs:
+                  name = job['name'].rsplit(' / ', 1)[-1]
+                  if name not in required:
+                      continue
+                  if name in verified or job['status'] != 'completed' or job['conclusion'] != 'success' or job['head_sha'] != commit or job['run_attempt'] != run['run_attempt']:
+                      raise ValueError('A native validation job did not pass for the release commit')
+                  passed = {step['name'] for step in job['steps'] if step['status'] == 'completed' and step['conclusion'] == 'success'}
+                  if not required[name].issubset(passed):
+                      raise ValueError('Required validation checks were skipped or failed')
+                  verified.add(name)
+              if verified != set(required):
+                  raise ValueError('Both native validation jobs must have passed')
+              print('Release commit has successful push validation; tests will not be rerun.')
+          except Exception as error:
+              if isinstance(error, urllib.error.HTTPError):
+                  error.close()
+              print('Release blocked: ' + str(error) + '. Push the commit and wait for Validation to pass before releasing; no retries or polling were attempted.', file=sys.stderr)
+              sys.exit(1)
+          PYTHON
+
+  build:
+    needs: validation
+    uses: ./.github/workflows/checks.yml
+    with:
+      tag: ${{ needs.validation.outputs.tag }}
+      commit: ${{ needs.validation.outputs.commit }}
+      upload_release_assets: true
 
   publish:
     needs: build

@@ -300,6 +300,77 @@ isolatedTest("CLI project init: folder binding, inherited scope, three repeat ch
   }
 });
 
+isolatedTest("CLI project init: inherited stdin modes and automatic real-terminal detection", { timeout: 60000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-init-descriptors-"));
+  const folder = join(directory, "work");
+  let server;
+  try {
+    await mkdir(folder);
+    server = await startServer(directory);
+    const initialized = await cli(["project", "init", "--server", server.origin, "--name", "Descriptor fixture", "--key", "DESCRIPTOR"], { cwd: folder });
+    assert.equal(initialized.code, 0, initialized.stderr);
+    const project = JSON.parse(initialized.stdout).project;
+    const registry = join(homeContext.getStore(), ".docket", "registry.json");
+    const original = await readFile(registry, "utf8");
+    const inputPath = join(directory, "input");
+    await writeFile(inputPath, "\n", { mode: 0o600 });
+    // Node uses socket pairs; Python also exercises actual pipes, files, and a private PTY.
+    const script = `
+import json, os, pty, subprocess, sys, time
+probe_timeout_seconds = 10
+deadline = time.monotonic() + probe_timeout_seconds
+arguments = [sys.argv[1], "project", "init"]
+results = []
+for kind in ["pipe", "file", "null", "terminal"]:
+    remaining_seconds = deadline - time.monotonic()
+    if remaining_seconds <= 0:
+        raise TimeoutError("Stdin descriptor checks exceeded deadline")
+    options = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True, "timeout": remaining_seconds}
+    if kind == "pipe":
+        result = subprocess.run(arguments, input="\\n", **options)
+    elif kind == "file":
+        with open(sys.argv[2]) as source:
+            result = subprocess.run(arguments, stdin=source, **options)
+    elif kind == "null":
+        result = subprocess.run(arguments, stdin=subprocess.DEVNULL, **options)
+    else:
+        master, slave = pty.openpty()
+        try:
+            answer = b"\\n"
+            written_bytes = os.write(master, answer)
+            assert written_bytes == len(answer)
+            result = subprocess.run(arguments, stdin=slave, **options)
+        finally:
+            try:
+                os.close(slave)
+            finally:
+                os.close(master)
+    results.append({"kind": kind, "code": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
+print(json.dumps(results))
+`;
+    const { stdout } = await execute("python3", ["-c", script, binary, inputPath], {
+      cwd: folder, timeout: commandTimeoutMs, maxBuffer: outputBytesMax,
+      env: { ...process.env, HOME: homeContext.getStore(), DOCKET_URL: "http://127.0.0.1:0", DOCKET_ACTOR: "" },
+    });
+    const results = JSON.parse(stdout);
+    assert.deepEqual(results.map(result => result.kind), ["pipe", "file", "null", "terminal"]);
+    for (const result of results) {
+      if (result.kind === "terminal") {
+        assert.equal(result.code, 0, result.stderr);
+        assert.match(result.stderr, /Keep existing \[default\]/);
+        assert.equal(JSON.parse(result.stdout).project.id, project.id);
+      } else {
+        assert.equal(result.code, 2, result.stderr);
+        assert.match(JSON.parse(result.stderr).error.message, /--on-existing/);
+        assert.equal(result.stdout, "");
+      }
+    }
+    assert.equal(await readFile(registry, "utf8"), original, "Descriptor probes must not change bindings");
+  } finally {
+    try { if (server) await stopServer(server.child); } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
 isolatedTest("CLI project init: interactive default and replacement choices, marker validation, and safe overrides", { timeout: 60000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "docket-init-prompt-"));
   const folder = join(directory, "work");
