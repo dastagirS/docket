@@ -4,6 +4,7 @@ export const ACTIVITY_VISIBLE_MAX = 500;
 export const STATUSES_MAX = 12;
 export const STATUS_BYTES_MAX = 100;
 export const ASSIGNEE_BYTES_MAX = 100;
+export const COMMENT_CHARACTERS_MAX = 2000;
 export const DEFAULT_STATUSES = ["To Do", "In Progress", "Blocked", "In Review", "Done"];
 const REQUEST_TIMEOUT_MS = 10000;
 

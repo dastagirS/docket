@@ -45,3 +45,11 @@ Public references:
 ## Local CLI bindings
 
 The private `~/.docket/registry.json` maps canonical folders to server/projects; it is not authorization or Pi ownership. Registry metadata is stored in bounded regular owner-only files; symlinks and malformed metadata are rejected. Identity verification compares the project key and creation timestamp before implicit ticket requests. Pending `~/.docket/init.lock` blocks affected implicit scope rather than guessing or replaying an interrupted init. Keep the user registry/journal private and out of source control; init never changes external integration pins. Filesystem durability is best-effort with sync/atomic rename, not a power-loss or hostile same-user process guarantee.
+
+## Description Markdown dependency review
+
+The browser uses exactly pinned `markdown-it` 15.0.3, including its bundled TypeScript declarations. Historical GitHub advisories include eight parser/regular-expression denial-of-service issues in markdown-it and two in transitive linkify-it; the resolved versions are outside those published affected ranges. The isolated new dependency tree reported zero known npm audit findings. This is not a guarantee against undisclosed vulnerabilities.
+
+Rendering disables raw HTML, embedded images, automatic linkification, and typography; active URL schemes are rejected, including data links. Parsing is bounded to the existing 16,000-byte description limit; oversized legacy/external input or a parser failure falls back to escaped text. Descriptions remain raw text in the API/database. Frontend tests exercise script/attribute/link payloads and pathological inputs without adding CI steps; build-only releases skip these already-gated tests.
+
+The full frontend audit also reports two pre-existing low-severity findings through the build-only vite-plugin-svelte/deepmerge chain (GHSA-gcqx-w48m-w2h4), with no npm-reported fix available. Those dependencies were not upgraded or suppressed as part of this change.

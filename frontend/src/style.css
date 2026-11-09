@@ -197,8 +197,39 @@ dialog::backdrop{background:#0008;backdrop-filter:blur(3px)}
 #status-error:not(:empty){margin:10px 0 0}
 .form-actions{display:flex;justify-content:flex-end;align-items:center;gap:10px;padding-top:2px}
 .form-error{color:var(--danger);font-size:12px;line-height:1.5;margin-bottom:12px;white-space:pre-wrap}
-.ticket-dialog{width:640px;max-width:calc(100vw - 20px);height:calc(100dvh - 24px);max-height:none;margin:12px 12px 12px auto;padding:26px 30px}
-.ticket-top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:30px}
+.ticket-dialog{width:640px;max-width:calc(100vw - 20px);height:calc(100dvh - 24px);max-height:none;margin:12px 12px 12px auto;padding:0;overflow:hidden}
+.ticket-dialog[open]{display:flex;flex-direction:column}
+.ticket-top{display:flex;flex-shrink:0;align-items:center;justify-content:space-between;gap:10px;padding:20px 30px;border-bottom:1px solid var(--border);background:var(--panel)}
+.ticket-body{flex:1 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain;padding:24px 30px;scrollbar-gutter:stable}
+.ticket-footer{flex-shrink:0;padding:16px 30px;border-top:1px solid var(--border);background:var(--panel)}
+.ticket-footer .form-error:empty{display:none}
+.description-field{margin-bottom:20px}
+.description-field>label{margin-bottom:8px}
+.description-view{position:relative;min-height:96px;border:1px solid var(--border);border-radius:7px;padding:12px;background:#171719}
+.description-edit-target{position:absolute;inset:0;width:100%;height:100%;z-index:1;padding:0;cursor:text}
+.description-edit-target:hover{background:transparent}
+.markdown-content{position:relative;pointer-events:none;font-size:14px;line-height:20px;overflow-wrap:anywhere}
+.markdown-plain{white-space:pre-wrap}
+.markdown-content>:first-child{margin-top:0}
+.markdown-content>:last-child{margin-bottom:0}
+.markdown-content p,.markdown-content ul,.markdown-content ol,.markdown-content blockquote,.markdown-content pre,.markdown-content table{margin:0 0 16px}
+.markdown-content h1{font-size:20px;line-height:28px}
+.markdown-content h2{font-size:18px;line-height:28px}
+.markdown-content h3,.markdown-content h4,.markdown-content h5,.markdown-content h6{font-size:16px;line-height:24px}
+.markdown-content h1,.markdown-content h2,.markdown-content h3,.markdown-content h4,.markdown-content h5,.markdown-content h6{margin:16px 0 8px;text-wrap:balance}
+.markdown-content ul,.markdown-content ol{padding-left:24px}
+.markdown-content li>ul,.markdown-content li>ol{margin-bottom:0}
+.markdown-content a{position:relative;z-index:2;pointer-events:auto;text-decoration:underline;text-underline-offset:3px}
+.markdown-content blockquote{border-left:2px solid var(--muted);padding-left:16px;color:var(--muted)}
+.markdown-content pre{max-width:100%;overflow:auto;padding:12px;background:var(--base);border-radius:7px}
+.markdown-content code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:16px}
+.markdown-content pre code{white-space:pre;overflow-wrap:normal}
+.markdown-content table{display:block;max-width:100%;overflow:auto;border-collapse:collapse}
+.markdown-content th,.markdown-content td{padding:8px;border:1px solid var(--border);text-align:left}
+.markdown-content em{font-style:normal;font-weight:600}
+.markdown-content hr{border:0;border-top:1px solid var(--border);margin:16px 0}
+#comment-counter{text-align:right}
+#comment-counter.over-limit{color:var(--danger)}
 .ticket-top-actions{display:flex;align-items:center;gap:8px}
 .ticket-dialog .archived-banner{border:1px solid var(--border);border-radius:7px;margin:-12px 0 20px;padding:10px 12px}
 .ticket-title{font-size:23px;letter-spacing:-.7px;font-weight:650;background:transparent;border:1px solid transparent;padding:10px 12px;resize:none;line-height:1.4;margin-bottom:18px;width:100%}
@@ -271,7 +302,10 @@ main{margin:4px 8px 8px;border-radius:10px}
 .list-table th:last-child{width:100px}
 .list-table td{padding:10px 6px}
 .list-status{font-size:10px;gap:5px}
-.ticket-dialog{width:100vw;max-width:100vw;height:100dvh;margin:0;border-radius:0;padding:22px;max-height:100dvh}
+.ticket-dialog{width:100vw;max-width:100vw;height:100dvh;margin:0;border-radius:0;padding:0;max-height:100dvh}
+.ticket-top{padding:20px}
+.ticket-body{padding:20px}
+.ticket-footer{padding:16px 20px;padding-bottom:max(16px,env(safe-area-inset-bottom))}
 .ticket-title{font-size:21px}
 .project-dialog{padding:23px}
 .settings-dialog{padding:0}

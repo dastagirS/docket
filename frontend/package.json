@@ -6,11 +6,13 @@
   "scripts": {
     "dev": "vite",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "build": "npm run check && vite build",
+    "build": "npm run check && npm test && vite build",
+    "test": "node --test tests/markdown.test.mjs",
     "build:assets": "vite build",
     "audit": "npm audit"
   },
   "dependencies": {
+    "markdown-it": "15.0.3",
     "svelte": "5.57.2"
   },
   "devDependencies": {

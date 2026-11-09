@@ -804,8 +804,8 @@ func (server *Server) createComment(writer http.ResponseWriter, request *http.Re
 		server.fail(writer, err)
 		return
 	}
-	if !validText(input.Body, TextBytesMax, true) {
-		server.fail(writer, &problem{400, "Comment required (16000 bytes max)"})
+	if !validText(input.Body, TextBytesMax, true) || utf8.RuneCountInString(input.Body) > CommentCharactersMax {
+		server.fail(writer, &problem{400, "Comment required (2000 characters max)"})
 		return
 	}
 	label, err := actor(request)

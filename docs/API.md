@@ -2,7 +2,7 @@
 
 Base URL: your configured origin, e.g. `http://127.0.0.1:7331`. No accounts, tokens, or API keys. All exposed API operations are available to anyone who can reach it.
 
-JSON writes require `Content-Type: application/json`; unknown fields, trailing JSON, invalid/oversized UTF-8 text, and cross-project ticket references are rejected. Descriptions/comments are plain text. `X-Docket-Actor` is an optional display label, default `Owner`, **not authenticated attribution**. Clients may spoof it; do not use it for authorization.
+JSON writes require `Content-Type: application/json`; unknown fields, trailing JSON, invalid/oversized UTF-8 text, and cross-project ticket references are rejected. Descriptions and comments are stored and returned as text. The browser renders description Markdown with raw HTML and embedded images disabled; comments remain plain text. `X-Docket-Actor` is an optional display label, default `Owner`, **not authenticated attribution**. Clients may spoof it; do not use it for authorization.
 
 ## Routes
 
@@ -42,7 +42,7 @@ curl -H 'Content-Type: application/json' -H 'If-Match: "2"' \
 
 Project creation: `name`, unique case-normalized `key` (2–10 ASCII letters/digits), optional `statuses` (ordered string array). Default statuses are documented in README. Projects expose `archived` (initially `false`). Project PATCH accepts `name` and `statuses` together, an `archived` boolean, or both. Key cannot change. Removing a status in use returns `409`; move its tickets first. `{"archived":true}` archives and `{"archived":false}` restores, with the usual `If-Match` precondition.
 
-Ticket creation requires `title`; `description` and `assignee` default empty and `status` defaults to the project's first status. `assignee` is a trimmed, free-text label of at most 100 UTF-8 bytes, not an account, authorization rule, or authenticated identity. An empty string means unassigned. Tickets expose `archived` (initially `false`); archive existing tickets with PATCH, not creation. Ticket PATCH accepts any nonempty subset of `title`, `description`, `status`, `assignee`, and `archived`. Set `assignee` to `""` to unassign. Comment POST accepts `body` and returns `{comment, ticket_version}`.
+Ticket creation requires `title`; `description` and `assignee` default empty and `status` defaults to the project's first status. `assignee` is a trimmed, free-text label of at most 100 UTF-8 bytes, not an account, authorization rule, or authenticated identity. An empty string means unassigned. Tickets expose `archived` (initially `false`); archive existing tickets with PATCH, not creation. Ticket PATCH accepts any nonempty subset of `title`, `description`, `status`, `assignee`, and `archived`. Set `assignee` to `""` to unassign. Comment POST accepts a nonblank `body` of at most 2,000 Unicode code points and returns `{comment, ticket_version}`. Existing longer comments remain readable without truncation.
 
 Tickets also expose `parent_id`: `null` for a top-level ticket, or the ID of its parent. On creation, optional `parent_id` must be `null` or a positive integer naming an existing top-level ticket in the same project. A missing/wrong-project parent returns `404`; invalid IDs or using a subticket as a parent return `400`. The parent link is immutable: any ticket PATCH containing `parent_id`, including `null`, returns `400`. Existing tickets cannot be converted or reparented in this version. This enforces exactly one level without recursive traversal or cycles.
 
@@ -89,7 +89,8 @@ Events survive ordinary restarts, process kills, and consistent backups. No even
 | SQLite main database | 512 MiB at 4096-byte pages; WAL/temporary/backup files need additional disk headroom |
 | Statuses per project | 1–12 unique, trimmed names |
 | Name / status / title / assignee | 100 / 100 / 200 / 100 UTF-8 bytes |
-| Description / comment / actor label | 16,000 / 16,000 / 80 UTF-8 bytes |
+| Description / actor label | 16,000 / 80 UTF-8 bytes |
+| New comment | 2,000 Unicode code points; existing longer comments are retained |
 | Request body / headers | 64 KiB / 16 KiB |
 | Page size | 1–100 |
 | Concurrent handlers / SQLite connections | 32 / 1 per process |

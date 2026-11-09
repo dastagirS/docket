@@ -18,19 +18,20 @@ import (
 )
 
 const (
-	ProjectsMax      = 128
-	TicketsMax       = 10000
-	EventsMax        = 250000
-	PageSizeMax      = 100
-	StatusesMax      = 12
-	NameBytesMax     = 100
-	TitleBytesMax    = 200
-	TextBytesMax     = 16000
-	ActorBytesMax    = 80
-	AssigneeBytesMax = 100
-	databasePagesMax = 131072 // 512 MiB at the required 4096-byte page size; never silently discard history.
-	queryTimeout     = 5 * time.Second
-	schemaVersion    = 3
+	ProjectsMax          = 128
+	TicketsMax           = 10000
+	EventsMax            = 250000
+	PageSizeMax          = 100
+	StatusesMax          = 12
+	NameBytesMax         = 100
+	TitleBytesMax        = 200
+	TextBytesMax         = 16000
+	CommentCharactersMax = 2000
+	ActorBytesMax        = 80
+	AssigneeBytesMax     = 100
+	databasePagesMax     = 131072 // 512 MiB at the required 4096-byte page size; never silently discard history.
+	queryTimeout         = 5 * time.Second
+	schemaVersion        = 3
 )
 
 var defaultStatuses = []string{"To Do", "In Progress", "Blocked", "In Review", "Done"}

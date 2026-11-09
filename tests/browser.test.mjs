@@ -111,6 +111,8 @@ test("real browser: forms, draft preservation, navigation races, conflicts, resp
     await browser("select", "#ticket-status", "In Progress");
     await browser("click", "#save-ticket");
     await browser("wait", "--fn", "!document.getElementById('save-ticket').disabled");
+    await browser("eval", "document.getElementById('description-preview').scrollIntoView({block:'center'}); true");
+    await browser("click", "#edit-description");
     await browser("fill", "#ticket-description", "Keep typography restrained. Add a short introduction and a clear link to recent work.");
     await browser("click", "#save-ticket");
     await browser("wait", "--fn", "!document.getElementById('save-ticket').disabled");
@@ -392,7 +394,10 @@ async function grantClipboardRead(browser, origin) {
     const targets = await command(1, "Target.getTargets", {});
     const target = targets.targetInfos.find((item) => item.url.startsWith(origin + "/"));
     assert.ok(target, "Disposable application tab must exist");
-    await command(2, "Browser.grantPermissions", { origin, permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"], ...(target.browserContextId ? { browserContextId: target.browserContextId } : {}) });
+    const contexts = await command(2, "Target.getBrowserContexts", {});
+    // Default-context IDs can appear on targets but are not accepted by grantPermissions.
+    const context = contexts.browserContextIds.includes(target.browserContextId) ? { browserContextId: target.browserContextId } : {};
+    await command(3, "Browser.grantPermissions", { origin, permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"], ...context });
     // Chromium removes this permission override when its CDP connection closes.
     return socket;
   } catch (error) { socket.close(); throw error; }
@@ -1106,6 +1111,8 @@ test("subtickets: one level, main-board visibility, parent navigation, live chil
     assert.match(await browser("eval", "document.getElementById('add-subticket') === null && document.getElementById('ticket-parent') !== null"), /true/);
     await browser("click", "#ticket-parent");
     await browser("wait", "--fn", `document.getElementById('ticket-reference').textContent === 'TREE-${parent.id}' && document.querySelectorAll('.subticket-row').length === 1`);
+    await browser("eval", "document.getElementById('description-preview').scrollIntoView({block:'center'}); true");
+    await browser("click", "#edit-description");
     await browser("fill", "#ticket-description", "Keep this unsaved parent draft");
     await browser("fill", "#comment-body", "Keep this unsent parent comment");
     const second = await request(server.origin, `/api/projects/${project.id}/tickets`, "POST", { title: "Another independent detail", parent_id: parent.id });
@@ -1142,6 +1149,7 @@ test("form focus: white highlights, padded controls, neutral compact frames, key
   const server = await startServer(join(directory, "test.sqlite"));
   const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
   const focus = async (selector) => {
+    if (selector === "#ticket-description" && /true/.test(await browser("eval", "document.getElementById('ticket-description').hidden"))) await browser("click", "#edit-description");
     await browser("eval", `document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'center'}); true`);
     await browser("click", selector);
     assert.match(await browser("eval", `document.activeElement === document.querySelector(${JSON.stringify(selector)})`), /true/);
@@ -1466,6 +1474,92 @@ test("workflow rows: whole-row mouse/touch drag, keyboard order, cancellation, s
     assert.deepEqual((await request(server.origin, "/api/projects/2")).statuses, [...defaults.slice(1), defaults[0]]);
   } finally {
     pointer?.close();
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test("ticket editor: pinned chrome, safe focus-to-edit Markdown, preserved drafts and Unicode comment limits", { timeout: 120000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-ticket-editor-"));
+  const session = `docket-ticket-editor-${process.pid}`;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  try {
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Editor review", key: "EDITOR" });
+    const description = '# Delivery\n\n**Readable Markdown**\n\n' + Array.from({length: 60}, (_, i) => `- Acceptance item ${i}`).join('\n') + '\n\n```text\n' + 'long-code-'.repeat(100) + '\n```\n\n<script>window.untrustedExecuted=true</script>\n![blocked](/never-load.png)\n[blocked](javascript:alert(1))';
+    const ticket = await request(server.origin, `/api/projects/${project.id}/tickets`, "POST", { title: "Persistent ticket controls", description });
+    const path = `/api/projects/${project.id}/tickets/${ticket.id}`;
+    await browser("set", "viewport", "1440", "900");
+    await browser("open", `${server.origin}/projects/${project.id}`);
+    await browser("wait", ".ticket-card");
+    await browser("click", ".ticket-card");
+    await browser("wait", "--fn", "document.getElementById('ticket-dialog').open");
+    assert.match(await browser("eval", "!!document.getElementById('ticket-body') && !!document.querySelector('.ticket-footer')"), /true/, "Ticket needs a separately scrolling body and persistent footer");
+    await browser("wait", "#description-preview");
+    assert.match(await browser("eval", `(() => {
+      const preview = document.getElementById('description-preview');
+      if (preview.querySelector('h1')?.textContent !== 'Delivery' || !preview.querySelector('strong')) throw new Error('Markdown did not render');
+      if (!document.getElementById('ticket-description').hidden) throw new Error('Existing description must open rendered');
+      if (preview.querySelector('script,img,iframe,svg') || preview.querySelector('a[href^="javascript:"]') || window.untrustedExecuted) throw new Error('Unsafe Markdown content became active');
+      if (performance.getEntriesByType('resource').some(entry => entry.name.endsWith('/never-load.png'))) throw new Error('Description loaded an unsolicited image');
+      if (!document.getElementById('save-ticket').closest('.ticket-footer') || document.getElementById('save-ticket').form?.id !== 'ticket-form') throw new Error('Save action must live in footer and retain form validation');
+      return 'PASS';
+    })()`), /PASS/);
+    for (const [width, height] of [[1440, 900], [390, 600]]) {
+      await browser("set", "viewport", String(width), String(height));
+      assert.match(await browser("eval", `(async () => {
+        const dialog = document.getElementById('ticket-dialog');
+        const body = document.getElementById('ticket-body');
+        const header = document.querySelector('.ticket-top');
+        const footer = document.querySelector('.ticket-footer');
+        const top = header.getBoundingClientRect().top, bottom = footer.getBoundingClientRect().bottom;
+        if (body.scrollHeight <= body.clientHeight) throw new Error('Fixture must overflow the middle pane');
+        for (const position of [0, body.scrollHeight / 2, body.scrollHeight]) {
+          body.scrollTop = position;
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          if (header.getBoundingClientRect().top !== top || footer.getBoundingClientRect().bottom !== bottom) throw new Error('Ticket chrome moved while scrolling');
+          const frame = dialog.getBoundingClientRect(), save = document.getElementById('save-ticket').getBoundingClientRect();
+          if (save.bottom > frame.bottom || save.top < frame.top || header.getBoundingClientRect().top < frame.top) throw new Error('Pinned actions left the viewport');
+          if (body.scrollWidth > body.clientWidth || dialog.scrollWidth > dialog.clientWidth) throw new Error('Markdown overflowed the ticket pane');
+        }
+        return 'PASS';
+      })()`), /PASS/);
+      if (process.env.DOCKET_SCREENSHOTS) {
+        await mkdir(process.env.DOCKET_SCREENSHOTS, { recursive: true });
+        await browser("screenshot", join(process.env.DOCKET_SCREENSHOTS, `ticket-pinned-${width}.png`));
+        await browser("eval", "document.getElementById('ticket-body').scrollTop = 0; true");
+        await browser("screenshot", join(process.env.DOCKET_SCREENSHOTS, `ticket-markdown-${width}.png`));
+      }
+    }
+    await browser("eval", "document.getElementById('ticket-body').scrollTop = 0; true");
+    await browser("focus", "#edit-description");
+    await browser("wait", "--fn", "!document.getElementById('ticket-description').hidden && document.activeElement.id === 'ticket-description'");
+    assert.match(await browser("eval", "document.getElementById('ticket-description').value.startsWith('# Delivery')"), /true/);
+    const updated = '# Updated\n\n**Saved Markdown**\n\n```text\n<script>literal</script>\n```';
+    await browser("fill", "#ticket-description", updated);
+    await browser("fill", "#comment-body", "Unsent discussion draft");
+    await browser("click", "#save-ticket");
+    await browser("wait", "--fn", "!document.getElementById('save-ticket').disabled && document.getElementById('ticket-description').hidden");
+    assert.match(await browser("eval", "document.querySelector('#description-preview h1')?.textContent === 'Updated' && document.getElementById('comment-body').value === 'Unsent discussion draft'"), /true/);
+    assert.equal((await request(server.origin, path)).description, updated, "API must retain raw Markdown exactly");
+    await browser("eval", "document.getElementById('description-preview').scrollIntoView({block:'center'}); true");
+    await browser("click", "#edit-description");
+    await browser("fill", "#ticket-description", "# Unsaved local Markdown");
+    const current = await request(server.origin, path);
+    await request(server.origin, path, "PATCH", { description: "# External change" }, current.version);
+    await browser("wait", "--fn", "!document.getElementById('reload-ticket').hidden");
+    assert.match(await browser("eval", "document.getElementById('ticket-description').value === '# Unsaved local Markdown' && !document.getElementById('ticket-description').hidden && document.getElementById('comment-body').value === 'Unsent discussion draft'"), /true/);
+    await browser("eval", "window.confirm = () => true; true");
+    await browser("click", "#reload-ticket");
+    await browser("wait", "--fn", "document.querySelector('#description-preview h1')?.textContent === 'External change'");
+    await browser("fill", "#comment-body", "a".repeat(2001));
+    assert.match(await browser("eval", "document.getElementById('post-comment').disabled && document.getElementById('comment-body').value.length === 2001 && document.getElementById('comment-body').getAttribute('aria-invalid') === 'true'"), /true/);
+    const comment = "😀".repeat(2000);
+    await browser("fill", "#comment-body", comment);
+    assert.match(await browser("eval", "!document.getElementById('post-comment').disabled && document.getElementById('comment-counter').textContent.startsWith('2,000 / 2,000')"), /true/);
+    await browser("click", "#post-comment");
+    await browser("wait", "--fn", "document.getElementById('comment-body').value === '' && !document.getElementById('post-comment').disabled");
+    assert.equal((await request(server.origin, path + "/comments")).items[0].body, comment);
+  } finally {
     try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
   }
 });

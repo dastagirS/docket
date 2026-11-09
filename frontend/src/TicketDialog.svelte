@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
   import Icon from "./Icon.svelte";
-  import { api, ApiError, errorMessage, ACTIVITY_VISIBLE_MAX, ASSIGNEE_BYTES_MAX, PAGE_SIZE, TICKETS_VISIBLE_MAX, projectPath, ticketPath, readTicket, readPage, readComment, readEvent, readCommentResult, dateLabel, type Project, type Ticket, type Comment, type ChangeEvent } from "./api";
+  import { renderDescription } from "./markdown";
+  import { api, ApiError, errorMessage, ACTIVITY_VISIBLE_MAX, ASSIGNEE_BYTES_MAX, COMMENT_CHARACTERS_MAX, PAGE_SIZE, TICKETS_VISIBLE_MAX, projectPath, ticketPath, readTicket, readPage, readComment, readEvent, readCommentResult, dateLabel, type Project, type Ticket, type Comment, type ChangeEvent } from "./api";
 
   export let onsaved: (projectID: number) => Promise<void>;
   export let notify: (message: string) => void;
@@ -11,6 +12,11 @@
   let ticket: Ticket | null = null;
   let title = "";
   let description = "";
+  let descriptionInput: HTMLTextAreaElement;
+  let descriptionEditing = true;
+  $: descriptionHTML = descriptionEditing ? "" : renderDescription(description);
+  $: commentCharacters = Array.from(commentBody).length;
+  $: commentTooLong = commentCharacters > COMMENT_CHARACTERS_MAX;
   let status = "";
   let assignee = "";
   let parentID: number | null = null;
@@ -54,6 +60,7 @@
     observedVersion = loaded?.version ?? 0;
     title = loaded?.title ?? "";
     description = loaded?.description ?? "";
+    descriptionEditing = loaded === null;
     status = loaded?.status ?? initialStatus;
     assignee = loaded?.assignee ?? "";
     parentID = loaded?.parent_id ?? initialParentID;
@@ -175,6 +182,12 @@
     if (failure instanceof ApiError && failure.status === 409) reload = true;
     return errorMessage(failure) + (failure instanceof ApiError ? "" : " Reload to check the result before submitting again.");
   }
+  async function editDescription(): Promise<void> {
+    if (pending || descriptionEditing) return;
+    descriptionEditing = true;
+    await tick();
+    descriptionInput.focus();
+  }
   async function save(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (pending || !project) return;
@@ -186,6 +199,7 @@
       const saved = await api(ticket ? ticketPath(selected.id, ticket.id) : `${projectPath(selected.id)}/tickets`, { method: ticket ? "PATCH" : "POST", headers: ticket ? { "If-Match": `"${ticket.version}"` } : {}, body: JSON.stringify({ title, description, status, assignee, ...(!ticket ? { parent_id: parentID } : {}) }) }, readTicket);
       ticket = saved;
       assignee = saved.assignee;
+      descriptionEditing = false;
       observedVersion = saved.version;
       dirty = false;
       reload = false;
@@ -200,6 +214,7 @@
   async function postComment(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (pending || !project || !ticket) return;
+    if (commentTooLong) { commentError = `Comments must be at most ${COMMENT_CHARACTERS_MAX.toLocaleString()} characters.`; return; }
     if (dirty) { commentError = "Save or discard your ticket edits before posting a comment."; return; }
     pending = true;
     commentError = "";
@@ -240,6 +255,7 @@
 <svelte:window onbeforeunload={beforeunload} />
 <dialog id="ticket-dialog" class="ticket-dialog" bind:this={dialog} oncancel={(event) => { event.preventDefault(); close(); }}>
   <div class="ticket-top"><span id="ticket-reference" class="mono muted">{ticket && project ? `${project.key}-${ticket.id}` : "NEW TICKET"}</span><div class="ticket-top-actions"><button id="archive-ticket" class="quiet" hidden={!ticket} disabled={pending} onclick={() => run(toggleArchive)}><Icon name={ticket?.archived ? "restore" : "archive"} />{ticket?.archived ? "Restore" : "Archive"}</button><button id="close-ticket" class="icon-button" aria-label="Close ticket" disabled={pending} onclick={close}><Icon name="close" /></button></div></div>
+  <div class="ticket-body" id="ticket-body">
   <p id="ticket-archived-banner" class="archived-banner" hidden={!ticket?.archived}><Icon name="archive" /> Archived ticket. Its description, comments, and history are retained.</p>
   {#if parentID !== null && project}
     <div class="ticket-parent"><span class="muted">Subticket of</span><button id="ticket-parent" class="quiet bordered" disabled={pending} onclick={() => run(() => open(project!, parentID))}>{project.key}-{parentID}<Icon name="arrow-up-right" /></button></div>
@@ -248,9 +264,15 @@
     <label class="sr-only" for="ticket-title">Ticket title</label><textarea id="ticket-title" bind:this={titleInput} bind:value={title} class="ticket-title" rows="2" maxlength="200" required placeholder="What needs to happen?" disabled={pending}></textarea>
     <label class="status-label">Status<select id="ticket-status" bind:value={status} required disabled={pending}>{#each project?.statuses ?? [] as name}<option value={name}>{name}</option>{/each}</select></label>
     <label>Assignee<input id="ticket-assignee" bind:value={assignee} maxlength={ASSIGNEE_BYTES_MAX} placeholder="Unassigned" autocomplete="off" disabled={pending}><small>Free-text name, no account required. Leave empty to unassign.</small></label>
-    <label>Description<textarea id="ticket-description" bind:value={description} rows="7" maxlength="16000" placeholder="Add context, requirements, or acceptance criteria…" disabled={pending}></textarea><small>Plain text. URLs and code stay exactly as written.</small></label>
-    <p id="ticket-error" class="form-error" role="alert">{ticketError}</p>
-    <div class="form-actions"><button id="reload-ticket" class="quiet" type="button" hidden={!reload} disabled={pending} onclick={() => { if (project && ticket) run(() => open(project!, ticket!.id)); }}>Reload latest</button><button id="save-ticket" type="submit" class="primary" disabled={pending}>{ticket ? "Save changes" : "Create ticket"}</button></div>
+    <div class="description-field">
+      <label id="description-label" for="ticket-description">Description</label>
+      <div class="description-view" hidden={descriptionEditing}>
+        <button id="edit-description" class="description-edit-target" type="button" aria-label="Edit description" disabled={pending} onfocus={() => run(editDescription)} onclick={() => run(editDescription)}></button>
+        <div id="description-preview" class="markdown-content" aria-labelledby="description-label">{#if description}{@html descriptionHTML}{:else}<p class="muted">Add context, requirements, or acceptance criteria…</p>{/if}</div>
+      </div>
+      <textarea id="ticket-description" bind:this={descriptionInput} bind:value={description} hidden={!descriptionEditing} rows="7" maxlength="16000" placeholder="Add context, requirements, or acceptance criteria…" disabled={pending}></textarea>
+      <small>{descriptionEditing ? "Markdown supported. Save changes to render your description." : "Click or focus the description to edit Markdown."}</small>
+    </div>
   </form>
   {#if ticket && parentID === null && project}
     <section id="subtickets" class="subtickets" aria-label="Subtickets" aria-busy={subticketsLoading}>
@@ -272,7 +294,7 @@
       {#if comments.length >= ACTIVITY_VISIBLE_MAX}<p class="empty-activity">Showing the first 500 entries. The full record remains available through the API.</p>{/if}
     </div>
     <button id="load-comments" class="quiet" hidden={!commentsMore} disabled={commentsLoading || pending} onclick={() => run(() => loadComments(true))}>More comments</button>
-    <form id="comment-form" onsubmit={(event) => run(() => postComment(event))}><label class="sr-only" for="comment-body">Comment</label><textarea id="comment-body" bind:value={commentBody} rows="3" required maxlength="16000" placeholder="Leave an update…" disabled={pending}></textarea><p id="comment-error" class="form-error" role="alert">{commentError}</p><div class="form-actions"><button id="post-comment" type="submit" class="quiet bordered" disabled={pending}>Post comment</button></div></form>
+    <form id="comment-form" onsubmit={(event) => run(() => postComment(event))}><label class="sr-only" for="comment-body">Comment</label><textarea id="comment-body" bind:value={commentBody} rows="3" required maxlength="16000" aria-describedby="comment-counter comment-error" aria-invalid={commentTooLong} placeholder="Leave an update…" disabled={pending}></textarea><small id="comment-counter" class:over-limit={commentTooLong}>{commentCharacters.toLocaleString()} / {COMMENT_CHARACTERS_MAX.toLocaleString()} characters</small><p id="comment-error" class="form-error" role="alert">{commentError}</p><div class="form-actions"><button id="post-comment" type="submit" class="quiet bordered" disabled={pending || commentTooLong}>Post comment</button></div></form>
     <div class="section-heading"><h3>History</h3><span class="muted">Recorded with every change</span></div>
     <div id="history">
       {#each history as item (item.id)}<div class="history-item"><span>{item.actor} {descriptions[item.kind] ?? item.kind}{item.data.status ? ` · ${item.data.status}` : ""}</span><time datetime={item.created_at}>{dateLabel(item.created_at)}</time></div>
@@ -281,4 +303,9 @@
     </div>
     <button id="load-history" class="quiet" hidden={!historyMore} disabled={historyLoading || pending} onclick={() => run(() => loadHistory(true))}>More history</button>
   </section>
+  </div>
+  <footer class="ticket-footer">
+    <p id="ticket-error" class="form-error" role="alert">{ticketError}</p>
+    <div class="form-actions"><button id="reload-ticket" class="quiet" type="button" hidden={!reload} disabled={pending} onclick={() => { if (project && ticket) run(() => open(project!, ticket!.id)); }}>Reload latest</button><button id="save-ticket" type="submit" form="ticket-form" class="primary" disabled={pending}>{ticket ? "Save changes" : "Create ticket"}</button></div>
+  </footer>
 </dialog>

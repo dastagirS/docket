@@ -82,7 +82,7 @@ docket comment add "$ticket_id" --project "$project_id" --server "$docket_url" \
 docket events list --project "$project_id" --server "$docket_url" --after "$cursor" --limit 20
 ```
 
-A comment advances the ticket's version, returned as `ticket_version`. Event reads do not acknowledge anything or persist a cursor. They do not authorize work, start agents, or update the separate Pi integration's delivery/ownership state.
+New comments must be nonblank and at most 2,000 Unicode code points. Existing longer comments remain readable. A comment advances the ticket's version, returned as `ticket_version`. Event reads do not acknowledge anything or persist a cursor. They do not authorize work, start agents, or update the separate Pi integration's delivery/ownership state.
 
 ## Paging and filters
 
