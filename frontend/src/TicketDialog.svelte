@@ -2,7 +2,7 @@
   import { onDestroy, tick } from "svelte";
   import Icon from "./Icon.svelte";
   import { renderDescription } from "./markdown";
-  import { api, ApiError, errorMessage, ACTIVITY_VISIBLE_MAX, ASSIGNEE_BYTES_MAX, COMMENT_CHARACTERS_MAX, PAGE_SIZE, TICKETS_VISIBLE_MAX, projectPath, ticketPath, readTicket, readPage, readComment, readEvent, readCommentResult, dateLabel, type Project, type Ticket, type Comment, type ChangeEvent } from "./api";
+  import { api, ApiError, errorMessage, ACTIVITY_VISIBLE_MAX, ASSIGNEE_BYTES_MAX, COMMENT_CHARACTERS_MAX, PAGE_SIZE, TICKET_LABELS_MAX, TICKETS_VISIBLE_MAX, projectPath, ticketPath, readTicket, readPage, readComment, readEvent, readCommentResult, dateLabel, type Project, type Ticket, type Comment, type ChangeEvent } from "./api";
 
   export let onsaved: (projectID: number) => Promise<void>;
   export let notify: (message: string) => void;
@@ -19,6 +19,7 @@
   $: commentTooLong = commentCharacters > COMMENT_CHARACTERS_MAX;
   let status = "";
   let assignee = "";
+  let labels: string[] = [];
   let parentID: number | null = null;
   let subtickets: Ticket[] = [];
   let subticketsArchived = false;
@@ -63,6 +64,7 @@
     descriptionEditing = loaded === null;
     status = loaded?.status ?? initialStatus;
     assignee = loaded?.assignee ?? "";
+    labels = [...(loaded?.labels ?? [])];
     parentID = loaded?.parent_id ?? initialParentID;
     subtickets = [];
     subticketsArchived = false;
@@ -101,6 +103,7 @@
       description = loaded.description;
       status = loaded.status;
       assignee = loaded.assignee;
+      labels = [...loaded.labels];
       reload = false;
       ticketError = "";
     }
@@ -182,6 +185,22 @@
     if (failure instanceof ApiError && failure.status === 409) reload = true;
     return errorMessage(failure) + (failure instanceof ApiError ? "" : " Reload to check the result before submitting again.");
   }
+  function toggleLabel(name: string): void {
+    if (pending) return;
+    if (labels.includes(name)) {
+      labels = labels.filter((label) => label !== name);
+      ticketError = "";
+      dirty = true;
+      return;
+    }
+    if (labels.length >= TICKET_LABELS_MAX) {
+      ticketError = `A ticket can carry at most ${TICKET_LABELS_MAX} labels.`;
+      return;
+    }
+    labels = [...labels, name];
+    ticketError = "";
+    dirty = true;
+  }
   async function editDescription(): Promise<void> {
     if (pending || descriptionEditing) return;
     descriptionEditing = true;
@@ -196,7 +215,7 @@
     ticketError = "";
     try {
       const editing = ticket !== null;
-      const saved = await api(ticket ? ticketPath(selected.id, ticket.id) : `${projectPath(selected.id)}/tickets`, { method: ticket ? "PATCH" : "POST", headers: ticket ? { "If-Match": `"${ticket.version}"` } : {}, body: JSON.stringify({ title, description, status, assignee, ...(!ticket ? { parent_id: parentID } : {}) }) }, readTicket);
+      const saved = await api(ticket ? ticketPath(selected.id, ticket.id) : `${projectPath(selected.id)}/tickets`, { method: ticket ? "PATCH" : "POST", headers: ticket ? { "If-Match": `"${ticket.version}"` } : {}, body: JSON.stringify({ title, description, status, assignee, labels, ...(!ticket ? { parent_id: parentID } : {}) }) }, readTicket);
       ticket = saved;
       assignee = saved.assignee;
       descriptionEditing = false;
@@ -264,6 +283,17 @@
     <label class="sr-only" for="ticket-title">Ticket title</label><textarea id="ticket-title" bind:this={titleInput} bind:value={title} class="ticket-title" rows="2" maxlength="200" required placeholder="What needs to happen?" disabled={pending}></textarea>
     <label class="status-label">Status<select id="ticket-status" bind:value={status} required disabled={pending}>{#each project?.statuses ?? [] as name}<option value={name}>{name}</option>{/each}</select></label>
     <label>Assignee<input id="ticket-assignee" bind:value={assignee} maxlength={ASSIGNEE_BYTES_MAX} placeholder="Unassigned" autocomplete="off" disabled={pending}><small>Free-text name, no account required. Leave empty to unassign.</small></label>
+    <div class="label-field">
+      <span class="field-label" id="ticket-labels-label">Labels</span>
+      {#if project?.labels.length}
+        <div class="label-picker" role="group" aria-labelledby="ticket-labels-label">
+          {#each project.labels as name (name)}<button type="button" class="label-chip selectable" class:selected={labels.includes(name)} aria-pressed={labels.includes(name)} disabled={pending} onclick={() => toggleLabel(name)}>{name}</button>{/each}
+        </div>
+        <small>Pick from this project's labels (up to {TICKET_LABELS_MAX}). Change the list in project settings.</small>
+      {:else}
+        <small class="muted">No labels defined. Add them in project settings, then tickets can use them.</small>
+      {/if}
+    </div>
     <div class="description-field">
       <label id="description-label" for="ticket-description">Description</label>
       <div class="description-view" hidden={descriptionEditing}>

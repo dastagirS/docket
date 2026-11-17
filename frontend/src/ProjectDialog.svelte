@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte";
   import { on } from "svelte/events";
   import Icon from "./Icon.svelte";
-  import { api, ApiError, errorMessage, DEFAULT_STATUSES, STATUSES_MAX, STATUS_BYTES_MAX, projectPath, readProject, type Project } from "./api";
+  import { api, ApiError, errorMessage, DEFAULT_STATUSES, LABELS_MAX, LABEL_BYTES_MAX, STATUSES_MAX, STATUS_BYTES_MAX, projectPath, readProject, type Project } from "./api";
 
   export let onsaved: (project: Project) => Promise<void>;
   export let onarchived: (project: Project) => Promise<void>;
@@ -15,6 +15,9 @@
   let key = "";
   let keyManual = false;
   let statuses = [...DEFAULT_STATUSES];
+  let labels: string[] = [];
+  let labelDraft = "";
+  let labelError = "";
   let expanded = false;
   let pending = false;
   let error = "";
@@ -152,6 +155,9 @@
     key = project?.key ?? "";
     keyManual = false;
     statuses = [...(project?.statuses ?? DEFAULT_STATUSES)];
+    labels = [...(project?.labels ?? [])];
+    labelDraft = "";
+    labelError = "";
     expanded = !!project;
     error = "";
     statusError = "";
@@ -194,11 +200,41 @@
     await focusStatus(statuses.length - 1);
   }
   function run(action: () => Promise<void>): void { action().catch((failure: unknown) => notify(errorMessage(failure))); }
+  // Labels are a closed vocabulary, so folding case and spaces prevents a needless rejection
+  // without letting a mistyped name become a new label.
+  function normalizeLabelInput(value: string): string {
+    return value.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  }
+  function addLabel(): boolean {
+    if (pending) return false;
+    const name = normalizeLabelInput(labelDraft);
+    let message = "";
+    if (!name) message = "Enter a label name.";
+    else if (new TextEncoder().encode(name).length > LABEL_BYTES_MAX) message = `Label names must fit within ${LABEL_BYTES_MAX} UTF-8 bytes.`;
+    else if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)) message = "Use lowercase letters, digits, or single hyphens, e.g. ui-fixes.";
+    else if (labels.includes(name)) message = "That label already exists.";
+    else if (labels.length >= LABELS_MAX) message = `Label limit reached (${LABELS_MAX}).`;
+    if (message) { labelError = message; return false; }
+    labels = [...labels, name];
+    labelDraft = "";
+    labelError = "";
+    return true;
+  }
+  function labelKeyPressed(event: KeyboardEvent): void {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    addLabel();
+  }
+  function removeLabel(index: number): void {
+    if (pending) return;
+    labels = labels.filter((_, itemIndex) => itemIndex !== index);
+    labelError = "";
+  }
   async function toggleArchive(): Promise<void> {
     if (!editing || pending || drag?.active) return;
     resetDrag();
     const selected = editing;
-    const unsaved = name !== selected.name || statuses.length !== selected.statuses.length || statuses.some((status, index) => status !== selected.statuses[index]);
+    const unsaved = name !== selected.name || statuses.length !== selected.statuses.length || statuses.some((status, index) => status !== selected.statuses[index]) || labels.length !== selected.labels.length || labels.some((label, index) => label !== selected.labels[index]);
     const message = selected.archived
       ? `Restore ${selected.name} to active projects?`
       : `Delete ${selected.name}? It will be archived, not permanently deleted. Tickets, comments, and history are kept, and you can restore it later.`;
@@ -234,10 +270,11 @@
       }
     }
     statusChanged();
+    if (labelDraft.trim() && !addLabel()) return;
     error = "";
     pending = true;
     try {
-      const input = { name: name.trim(), statuses: workflow, ...(!editing ? { key: key.toUpperCase() } : {}) };
+      const input = { name: name.trim(), statuses: workflow, labels, ...(!editing ? { key: key.toUpperCase() } : {}) };
       const saved = await api(editing ? projectPath(editing.id) : "/api/projects", { method: editing ? "PATCH" : "POST", body: JSON.stringify(input), headers: editing ? { "If-Match": `"${editing.version}"` } : {} }, readProject);
       dialog.close();
       await onsaved(saved);
@@ -287,6 +324,14 @@
           <p class="workflow-hint workflow-safety">Move tickets before removing or renaming a status in use.</p>
         </div>
         <p id="status-error" class="form-error" role="alert">{statusError}</p>
+      </section>
+      <section class="labels-section" aria-labelledby="labels-label">
+        <div class="workflow-heading"><div class="workflow-title"><h3 id="labels-label">Labels</h3><span id="label-count" aria-label={`${labels.length} of ${LABELS_MAX} labels`}>{labels.length} / {LABELS_MAX}</span></div></div>
+        <p class="settings-section-help">Tickets can only use labels defined here. Add a label before tagging tickets so nothing invents its own vocabulary.</p>
+        <div id="label-chips" class="label-chips" aria-label="Project labels">{#each labels as label, index}<span class="label-chip removable">{label}<button type="button" class="label-remove" aria-label={`Remove label ${label}`} disabled={pending} onclick={() => removeLabel(index)}><Icon name="close" /></button></span>{:else}<span class="muted label-empty">No labels yet.</span>{/each}</div>
+        <div class="label-add"><input id="label-input" type="text" bind:value={labelDraft} oninput={() => { labelError = ""; }} onkeydown={labelKeyPressed} maxlength={LABEL_BYTES_MAX} placeholder="e.g. ui" autocomplete="off" aria-label="New label name" aria-describedby="label-help" disabled={pending}><button id="add-label" class="quiet bordered" type="button" disabled={pending || labels.length >= LABELS_MAX} onclick={addLabel}><Icon name="plus" /> Add label</button></div>
+        <p id="label-help" class="workflow-hint">Lowercase letters, digits, and single hyphens. Up to 32 labels; a ticket can carry up to 8.</p>
+        <p id="label-error" class="form-error" role="alert">{labelError}</p>
       </section>
       {#if editing}
         <section id="project-lifecycle" class="project-lifecycle" class:project-restoring={editing.archived} aria-labelledby="project-lifecycle-title">

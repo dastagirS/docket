@@ -668,6 +668,103 @@ test("assignee: free-text create, edit, clear, safe rendering, and live draft pr
   }
 });
 
+test("labels: project vocabulary, ticket selection, board filter, and in-use protection", { timeout: 60000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-labels-"));
+  const session = `docket-labels-${process.pid}`;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  try {
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Labels", key: "TAG", labels: ["ui", "api"] });
+    await browser("open", `${server.origin}/projects/${project.id}`);
+    const screenshots = process.env.DOCKET_SCREENSHOTS;
+    if (screenshots) await mkdir(screenshots, { recursive: true });
+    await browser("click", "#new-ticket");
+    if (screenshots) await browser("screenshot", join(screenshots, "labels-ticket-1440.png"));
+    assert.match(await browser("eval", `(() => {
+      const chips = [...document.querySelectorAll('.label-chip.selectable')].map(chip => chip.textContent.trim());
+      if (chips.join(',') !== 'ui,api') throw new Error('Ticket picker must offer exactly the project labels: ' + chips.join(','));
+      if (!document.getElementById('ticket-labels-label')) throw new Error('Label field is not labelled');
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("fill", "#ticket-title", "Tagged ticket");
+    await browser("click", ".label-chip.selectable");
+    assert.match(await browser("eval", `(() => {
+      const chip = document.querySelector('.label-chip.selectable');
+      if (chip.getAttribute('aria-pressed') !== 'true') throw new Error('Selected label is not announced as pressed');
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("click", "#save-ticket");
+    await browser("wait", "--fn", "document.querySelector('.card-labels .label-chip')?.textContent.trim() === 'ui'");
+    const tagged = (await request(server.origin, `/api/projects/${project.id}/tickets`)).items[0];
+    assert.deepEqual(tagged.labels, ["ui"]);
+    await browser("click", "#new-ticket");
+    await browser("fill", "#ticket-title", "Untagged ticket");
+    await browser("click", "#save-ticket");
+    await browser("wait", "--fn", "document.querySelectorAll('.ticket-card').length === 2");
+    await browser("eval", `(() => {
+      const select = document.getElementById('label-filter');
+      if (!select) throw new Error('Label filter is missing');
+      if ([...select.options].map(option => option.value).join(',') !== ',ui,api') throw new Error('Filter must list every project label once');
+      select.value = 'ui';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return 'PASS';
+    })()`);
+    await browser("wait", "--fn", "document.querySelectorAll('.ticket-card').length === 1");
+    assert.match(await browser("eval", `(() => {
+      if (!document.querySelector('.ticket-card').textContent.includes('Tagged ticket')) throw new Error('Filter kept the wrong ticket');
+      const select = document.getElementById('label-filter');
+      select.value = '';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return 'PASS';
+    })()`), /PASS/);
+
+    await browser("click", "#project-settings");
+    await browser("fill", "#label-input", " Docs ");
+    await browser("click", "#add-label");
+    assert.match(await browser("eval", `(() => {
+      const chips = [...document.querySelectorAll('#label-chips .label-chip')].map(chip => chip.textContent.trim());
+      if (chips.join(',') !== 'ui,api,docs') throw new Error('New label was not normalized and appended: ' + chips.join(','));
+      return 'PASS';
+    })()`), /PASS/);
+    if (screenshots) await browser("screenshot", join(screenshots, "labels-settings-1440.png"));
+    await browser("click", "#save-project");
+    await browser("wait", "--fn", "!document.getElementById('project-dialog').open");
+    const extended = await request(server.origin, `/api/projects/${project.id}`);
+    assert.deepEqual(extended.labels, ["ui", "api", "docs"]);
+
+    await browser("click", "#project-settings");
+    await browser("eval", `(() => {
+      const remove = [...document.querySelectorAll('#label-chips .label-chip')].find(chip => chip.textContent.trim().startsWith('ui'));
+      if (!remove) throw new Error('Cannot find the ui label to remove');
+      remove.querySelector('button').click();
+      return 'PASS';
+    })()`);
+    await browser("click", "#save-project");
+    await browser("wait", "--fn", "document.getElementById('project-error').textContent.includes('Remove label ui')");
+    assert.match(await browser("eval", `(() => {
+      if (!document.getElementById('project-dialog').open) throw new Error('A rejected save must keep the settings open');
+      return 'PASS';
+    })()`), /PASS/);
+    await browser("click", "#cancel-project");
+    assert.deepEqual((await request(server.origin, `/api/projects/${project.id}`)).labels, ["ui", "api", "docs"], "Rejected removal must not change stored labels");
+
+    await browser("set", "viewport", "1440", "900");
+    await browser("wait", "--fn", "document.querySelectorAll('.ticket-card').length === 2");
+    if (screenshots) await browser("screenshot", join(screenshots, "labels-board-1440.png"));
+    await browser("set", "viewport", "390", "844");
+    assert.match(await browser("eval", `(() => {
+      for (const chip of document.querySelectorAll('.card-labels .label-chip')) {
+        const bounds = chip.getBoundingClientRect();
+        if (bounds.width <= 0 || bounds.left < 0 || bounds.right > innerWidth) throw new Error('Label chip overflows the phone board');
+      }
+      return 'PASS';
+    })()`), /PASS/);
+    if (screenshots) await browser("screenshot", join(screenshots, "labels-board-390.png"));
+  } finally {
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
 test("project settings: gear entry, delete-to-archive help, cancellation, stale restore, and phone layout", { timeout: 45000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "docket-settings-"));
   const session = `docket-settings-${process.pid}`;
@@ -1417,6 +1514,8 @@ test("workflow rows: whole-row mouse/touch drag, keyboard order, cancellation, s
     assert.deepEqual((await request(server.origin, `/api/projects/${project.id}`)).statuses, ["Build", "Review", "Done", "Ideas"]);
     await browser("set", "viewport", "390", "844");
     await browser("click", "#project-settings");
+    // The settings body scrolls; bring the status list into view before measuring touch points.
+    await browser("eval", "document.getElementById('workflow-statuses').scrollIntoView({block:'center'}); true");
     await pointer.send("Emulation.setTouchEmulationEnabled", { enabled: true });
     const tap = await point(".status-row:first-child .status-name");
     await pointer.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ ...tap, id: 1 }] });

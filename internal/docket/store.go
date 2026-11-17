@@ -23,6 +23,9 @@ const (
 	EventsMax            = 250000
 	PageSizeMax          = 100
 	StatusesMax          = 12
+	LabelsMax            = 32
+	TicketLabelsMax      = 8
+	LabelBytesMax        = 32
 	NameBytesMax         = 100
 	TitleBytesMax        = 200
 	TextBytesMax         = 16000
@@ -31,7 +34,7 @@ const (
 	AssigneeBytesMax     = 100
 	databasePagesMax     = 131072 // 512 MiB at the required 4096-byte page size; never silently discard history.
 	queryTimeout         = 5 * time.Second
-	schemaVersion        = 3
+	schemaVersion        = 4
 )
 
 var defaultStatuses = []string{"To Do", "In Progress", "Blocked", "In Review", "Done"}
@@ -41,23 +44,25 @@ type Project struct {
 	Name      string   `json:"name"`
 	Key       string   `json:"key"`
 	Statuses  []string `json:"statuses"`
+	Labels    []string `json:"labels"`
 	Version   int64    `json:"version"`
 	CreatedAt string   `json:"created_at"`
 	Archived  bool     `json:"archived"`
 }
 
 type Ticket struct {
-	ID          int64  `json:"id"`
-	ProjectID   int64  `json:"project_id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Status      string `json:"status"`
-	Version     int64  `json:"version"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
-	Archived    bool   `json:"archived"`
-	Assignee    string `json:"assignee"`
-	ParentID    *int64 `json:"parent_id"`
+	ID          int64    `json:"id"`
+	ProjectID   int64    `json:"project_id"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Status      string   `json:"status"`
+	Version     int64    `json:"version"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
+	Archived    bool     `json:"archived"`
+	Assignee    string   `json:"assignee"`
+	ParentID    *int64   `json:"parent_id"`
+	Labels      []string `json:"labels"`
 }
 
 type Comment struct {
@@ -177,6 +182,15 @@ CREATE INDEX tickets_parent ON tickets(project_id,parent_id,id);
 PRAGMA user_version=3;`); err != nil {
 			return err
 		}
+		version = 3
+	}
+	if version == 3 {
+		if _, err := transaction.ExecContext(ctx, `
+ALTER TABLE projects ADD COLUMN labels TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(labels));
+ALTER TABLE tickets ADD COLUMN labels TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(labels));
+PRAGMA user_version=4;`); err != nil {
+			return err
+		}
 		return transaction.Commit()
 	}
 	_, err = transaction.ExecContext(ctx, `
@@ -185,6 +199,7 @@ CREATE TABLE projects (
  name TEXT NOT NULL,
  key TEXT NOT NULL UNIQUE,
  statuses TEXT NOT NULL CHECK(json_valid(statuses)),
+ labels TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(labels)),
  version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
  created_at TEXT NOT NULL,
  archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1))
@@ -200,7 +215,8 @@ CREATE TABLE tickets (
  updated_at TEXT NOT NULL,
  archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)),
  assignee TEXT NOT NULL DEFAULT '',
- parent_id INTEGER REFERENCES tickets(id) CHECK(parent_id > 0 AND parent_id <> id)
+ parent_id INTEGER REFERENCES tickets(id) CHECK(parent_id > 0 AND parent_id <> id),
+ labels TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(labels))
 );
 CREATE INDEX tickets_project ON tickets(project_id, id);
 CREATE INDEX tickets_parent ON tickets(project_id,parent_id,id);
@@ -223,7 +239,7 @@ CREATE TABLE events (
 );
 CREATE INDEX events_project ON events(project_id, id);
 CREATE INDEX events_ticket ON events(ticket_id, id);
-PRAGMA user_version=3;`)
+PRAGMA user_version=4;`)
 	if err != nil {
 		return err
 	}
@@ -282,8 +298,8 @@ type rowReader interface{ Scan(...any) error }
 
 func readProject(row rowReader) (Project, error) {
 	var project Project
-	var statuses string
-	if err := row.Scan(&project.ID, &project.Name, &project.Key, &statuses, &project.Version, &project.CreatedAt, &project.Archived); err != nil {
+	var statuses, labels string
+	if err := row.Scan(&project.ID, &project.Name, &project.Key, &statuses, &labels, &project.Version, &project.CreatedAt, &project.Archived); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return project, notFound
 		}
@@ -295,20 +311,34 @@ func readProject(row rowReader) (Project, error) {
 	if err := validateStatuses(project.Statuses); err != nil {
 		return project, errors.New("invalid stored status configuration")
 	}
+	stored, err := decodeLabels(labels, LabelsMax)
+	if err != nil {
+		return project, errors.New("invalid stored project labels")
+	}
+	project.Labels = stored
 	return project, nil
 }
 
 func readTicket(row rowReader) (Ticket, error) {
 	var ticket Ticket
-	err := row.Scan(&ticket.ID, &ticket.ProjectID, &ticket.Title, &ticket.Description, &ticket.Status, &ticket.Version, &ticket.CreatedAt, &ticket.UpdatedAt, &ticket.Archived, &ticket.Assignee, &ticket.ParentID)
+	var labels string
+	err := row.Scan(&ticket.ID, &ticket.ProjectID, &ticket.Title, &ticket.Description, &ticket.Status, &ticket.Version, &ticket.CreatedAt, &ticket.UpdatedAt, &ticket.Archived, &ticket.Assignee, &ticket.ParentID, &labels)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ticket, notFound
 	}
-	return ticket, err
+	if err != nil {
+		return ticket, err
+	}
+	stored, err := decodeLabels(labels, TicketLabelsMax)
+	if err != nil {
+		return ticket, errors.New("invalid stored ticket labels")
+	}
+	ticket.Labels = stored
+	return ticket, nil
 }
 
-const projectColumns = "id,name,key,statuses,version,created_at,archived"
-const ticketColumns = "id,project_id,title,description,status,version,created_at,updated_at,archived,assignee,parent_id"
+const projectColumns = "id,name,key,statuses,labels,version,created_at,archived"
+const ticketColumns = "id,project_id,title,description,status,version,created_at,updated_at,archived,assignee,parent_id,labels"
 
 func validText(value string, maximum int, required bool) bool {
 	return utf8.ValidString(value) && len(value) <= maximum && !strings.ContainsRune(value, 0) && (!required || strings.TrimSpace(value) != "")
@@ -326,6 +356,115 @@ func validateStatuses(statuses []string) error {
 		seen[status] = true
 	}
 	return nil
+}
+
+// Labels are a closed, project-scoped vocabulary. Normalizing case and spacing keeps a
+// correctly named label from failing only because an agent capitalized it.
+func normalizeLabel(label string) (string, bool) {
+	canonical := strings.ToLower(strings.TrimSpace(label))
+	if !validText(canonical, LabelBytesMax, true) {
+		return "", false
+	}
+	previousHyphen := true // A leading hyphen must not be accepted.
+	for _, character := range canonical {
+		switch {
+		case character >= 'a' && character <= 'z', character >= '0' && character <= '9':
+			previousHyphen = false
+		case character == '-' && !previousHyphen:
+			previousHyphen = true
+		default:
+			return "", false
+		}
+	}
+	return canonical, !previousHyphen
+}
+
+func validateProjectLabels(labels []string) ([]string, error) {
+	if len(labels) > LabelsMax {
+		return nil, &problem{400, fmt.Sprintf("A project may define at most %d labels", LabelsMax)}
+	}
+	canonical := make([]string, 0, len(labels))
+	seen := make(map[string]bool, len(labels))
+	for _, label := range labels {
+		name, ok := normalizeLabel(label)
+		if !ok {
+			return nil, &problem{400, "Labels must be 1–32 bytes of letters, digits, or single hyphens, e.g. ui"}
+		}
+		if seen[name] {
+			return nil, &problem{400, fmt.Sprintf("Label %q is listed twice", name)}
+		}
+		seen[name] = true
+		canonical = append(canonical, name)
+	}
+	return canonical, nil
+}
+
+// validateTicketLabels rejects invented vocabulary and names the valid options so a client
+// can correct itself without a second discovery read.
+func validateTicketLabels(labels []string, allowed []string) ([]string, error) {
+	if len(labels) > TicketLabelsMax {
+		return nil, &problem{400, fmt.Sprintf("A ticket may have at most %d labels", TicketLabelsMax)}
+	}
+	permitted := make(map[string]bool, len(allowed))
+	for _, label := range allowed {
+		permitted[label] = true
+	}
+	canonical := make([]string, 0, len(labels))
+	seen := make(map[string]bool, len(labels))
+	unknownCount := 0
+	unknown := make([]string, 0, len(labels))
+	for _, label := range labels {
+		name, ok := normalizeLabel(label)
+		if !ok || !permitted[name] {
+			unknownCount++
+			if len(unknown) < TicketLabelsMax {
+				// Bound the echo: a rejected value must not turn one error into an unbounded response.
+				shown := []rune(strings.TrimSpace(label))
+				if len(shown) > LabelBytesMax {
+					shown = shown[:LabelBytesMax]
+				}
+				unknown = append(unknown, fmt.Sprintf("%q", string(shown)))
+			}
+			continue
+		}
+		if !seen[name] {
+			seen[name] = true
+			canonical = append(canonical, name)
+		}
+	}
+	if unknownCount > 0 {
+		message := "Unknown labels: " + strings.Join(unknown, ", ")
+		if unknownCount > len(unknown) {
+			message += fmt.Sprintf(" and %d more", unknownCount-len(unknown))
+		}
+		message += "."
+		if len(allowed) == 0 {
+			message += " This project defines no labels yet; add them in project settings first."
+		} else {
+			message += " This project defines: " + strings.Join(allowed, ", ") + "."
+		}
+		return nil, &problem{400, message}
+	}
+	return canonical, nil
+}
+
+func decodeLabels(raw string, maximum int) ([]string, error) {
+	labels := []string{}
+	if err := json.Unmarshal([]byte(raw), &labels); err != nil {
+		return nil, err
+	}
+	if labels == nil {
+		labels = []string{}
+	}
+	if len(labels) > maximum {
+		return nil, errors.New("too many stored labels")
+	}
+	for _, label := range labels {
+		if _, ok := normalizeLabel(label); !ok {
+			return nil, errors.New("stored label is not canonical")
+		}
+	}
+	return labels, nil
 }
 
 func databaseProblem(err error) error {

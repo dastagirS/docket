@@ -16,6 +16,8 @@ A small, independent ticketing system for humans and API clients. External integ
 
 **Status**: A configurable progress state for a ticket.
 
+**Label**: A named, project-scoped classification a ticket may carry. Labels are defined in project settings; a ticket may use only labels its own project defines.
+
 **Comment**: An attributed contribution to a ticket's discussion.
 
 **History**: The recorded changes to a ticket and their attribution.
@@ -36,7 +38,8 @@ A small, independent ticketing system for humans and API clients. External integ
 
 - A **Project** contains **Tickets**.
 - A top-level **Ticket** may have multiple **Subtickets**. Subtickets cannot have children. Status, assignee, comments, history, versions, and archiving are independent; there are no automatic rollups or archive cascades.
-- A **Ticket** has a current **Status**, optional **Assignee**, **Comments**, and **History**.
+- A **Ticket** has a current **Status**, optional **Assignee**, zero or more **Labels**, **Comments**, and **History**.
+- A **Project** defines the **Labels** its tickets may use. A ticket carries at most eight.
 - Projects and tickets may be **Archived** independently. Archiving a project preserves its tickets and their individual archive states.
 - **Change events** let **Integrations** react without making the integration part of the ticketing system.
 - The CLI **Folder binding** is separate from the Pi **Integration**'s repository pin, parent-session ownership, agent delegation, and assigned-ticket-only access. Updating the home registry never changes those integration policies or markers.
@@ -68,3 +71,5 @@ A small, independent ticketing system for humans and API clients. External integ
 - Release CI cleanup resolved: use checkout’s commit output rather than a separate recording step; Linux artifact/security/portability targets share the validated `BUILD_VERSION` and run sequentially to reuse the stamped Docker build. Matrix fail-fast cancels unnecessary work after one platform fails. No verification gates are removed, and publishing still requires both platform builds.
 - Push validation resolved: every branch push (not tags) runs native Linux/Apple Silicon frontend, Go race/vet, real executable, vulnerability, and baseline CPU/SQLite smoke checks with a `dev` stamp and read-only permissions. The Go suite is not repeated under QEMU. New pushes cancel stale validation on the same branch. Release first requires the latest successful Validation run and both native check jobs/steps for the exact tagged commit and run attempt; missing, pending, failed, skipped, or unreadable proof fails immediately without polling. Native builds then check out that approved commit, stamp/sign/package artifacts, and publish without repeating tests, vet, frontend type checks, scans, or QEMU. The shared build recipe has release-only packaging/uploads; only the small gate gains `actions: read`, and only the separate publisher gains write access. Push and validate master before invoking the release helper; its atomic push does not wait for CI.
 - Ticket editor resolved: the ticket ID/archive/close header and Save/Reload footer stay outside a single scrolling body on desktop and mobile. Descriptions display bounded Markdown by default, switch to raw editing on focus/click, and render again only after a successful save; polling and failures preserve drafts. Raw HTML, embedded images, automatic linkification and typography are disabled in pinned markdown-it 15.0.3; its historical advisories and current dependency findings are documented in SECURITY.md. New comments are capped at 2,000 Unicode code points in the UI and API with a live counter; existing longer comments remain intact and descriptions retain the 16,000-byte storage bound.
+
+- Label vocabulary resolved: labels are a closed, project-scoped list managed in project settings, never free text on a ticket. Names are trimmed, lowercased, and limited to 32 UTF-8 bytes of letters, digits, and single hyphens, so `UI` matches an existing `ui` instead of creating a second label. A ticket carries at most eight and may only use labels its project defines; an unknown label fails with the offending names and the project's available labels so a client can correct itself in one retry without a discovery read. Removing a label still in use is rejected, matching statuses. Labels are classification only: no issue types, priority, components, versions, or per-type workflows are implied, and the epic/type/parent decision remains deferred.

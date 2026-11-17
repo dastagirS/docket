@@ -326,6 +326,7 @@ func (server *Server) createProject(writer http.ResponseWriter, request *http.Re
 		Name     string   `json:"name"`
 		Key      string   `json:"key"`
 		Statuses []string `json:"statuses"`
+		Labels   []string `json:"labels"`
 	}
 	if err := decode(writer, request, &input); err != nil {
 		server.fail(writer, err)
@@ -350,6 +351,11 @@ func (server *Server) createProject(writer http.ResponseWriter, request *http.Re
 		server.fail(writer, err)
 		return
 	}
+	projectLabels, err := validateProjectLabels(input.Labels)
+	if err != nil {
+		server.fail(writer, err)
+		return
+	}
 	label, err := actor(request)
 	if err != nil {
 		server.fail(writer, err)
@@ -367,13 +373,17 @@ func (server *Server) createProject(writer http.ResponseWriter, request *http.Re
 		if err != nil {
 			return nil, err
 		}
+		labels, err := json.Marshal(projectLabels)
+		if err != nil {
+			return nil, err
+		}
 		createdAt := time.Now().UTC().Format(time.RFC3339Nano)
-		result, err := transaction.ExecContext(request.Context(), "INSERT INTO projects(name,key,statuses,created_at) VALUES(?,?,?,?)", input.Name, input.Key, string(statuses), createdAt)
+		result, err := transaction.ExecContext(request.Context(), "INSERT INTO projects(name,key,statuses,labels,created_at) VALUES(?,?,?,?,?)", input.Name, input.Key, string(statuses), string(labels), createdAt)
 		if err != nil {
 			return nil, err
 		}
 		id, err := result.LastInsertId()
-		return Project{ID: id, Name: input.Name, Key: input.Key, Statuses: input.Statuses, Version: 1, CreatedAt: createdAt}, err
+		return Project{ID: id, Name: input.Name, Key: input.Key, Statuses: input.Statuses, Labels: projectLabels, Version: 1, CreatedAt: createdAt}, err
 	})
 	if err != nil {
 		server.fail(writer, err)
@@ -394,16 +404,17 @@ func (server *Server) updateProject(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	var input struct {
-		Name     *string  `json:"name"`
-		Statuses []string `json:"statuses"`
-		Archived *bool    `json:"archived"`
+		Name     *string   `json:"name"`
+		Statuses []string  `json:"statuses"`
+		Labels   *[]string `json:"labels"`
+		Archived *bool     `json:"archived"`
 	}
 	if err := decode(writer, request, &input); err != nil {
 		server.fail(writer, err)
 		return
 	}
-	if (input.Name == nil) != (input.Statuses == nil) || (input.Name == nil && input.Archived == nil) {
-		server.fail(writer, &problem{400, "Provide name and statuses together, or an archived flag"})
+	if (input.Name == nil) != (input.Statuses == nil) || (input.Name == nil && input.Labels == nil && input.Archived == nil) {
+		server.fail(writer, &problem{400, "Provide name and statuses together, or labels, or an archived flag"})
 		return
 	}
 	if input.Name != nil {
@@ -413,6 +424,14 @@ func (server *Server) updateProject(writer http.ResponseWriter, request *http.Re
 			return
 		}
 		if err := validateStatuses(input.Statuses); err != nil {
+			server.fail(writer, err)
+			return
+		}
+	}
+	var requestedLabels []string
+	if input.Labels != nil {
+		requestedLabels, err = validateProjectLabels(*input.Labels)
+		if err != nil {
 			server.fail(writer, err)
 			return
 		}
@@ -430,9 +449,13 @@ func (server *Server) updateProject(writer http.ResponseWriter, request *http.Re
 		if project.Version != version {
 			return nil, conflict
 		}
+		previousLabels := project.Labels
 		if input.Name != nil {
 			project.Name = *input.Name
 			project.Statuses = input.Statuses
+		}
+		if input.Labels != nil {
+			project.Labels = requestedLabels
 		}
 		if input.Archived != nil {
 			project.Archived = *input.Archived
@@ -456,11 +479,30 @@ func (server *Server) updateProject(writer http.ResponseWriter, request *http.Re
 		if err != nil {
 			return nil, err
 		}
+		if input.Labels != nil {
+			for _, retired := range previousLabels {
+				if slices.Contains(project.Labels, retired) {
+					continue
+				}
+				var used int64
+				err := transaction.QueryRowContext(request.Context(), `SELECT id FROM tickets WHERE project_id=? AND EXISTS (SELECT 1 FROM json_each(tickets.labels) WHERE value=?) LIMIT 1`, projectID, retired).Scan(&used)
+				if err == nil {
+					return nil, &problem{409, "Remove label " + retired + " from its tickets before deleting it from the project"}
+				}
+				if !errors.Is(err, sql.ErrNoRows) {
+					return nil, err
+				}
+			}
+		}
 		statuses, err := json.Marshal(project.Statuses)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := transaction.ExecContext(request.Context(), "UPDATE projects SET name=?,statuses=?,archived=?,version=version+1 WHERE id=?", project.Name, string(statuses), project.Archived, projectID); err != nil {
+		projectLabels, err := json.Marshal(project.Labels)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := transaction.ExecContext(request.Context(), "UPDATE projects SET name=?,statuses=?,labels=?,archived=?,version=version+1 WHERE id=?", project.Name, string(statuses), string(projectLabels), project.Archived, projectID); err != nil {
 			return nil, err
 		}
 		project.Version++
@@ -501,8 +543,17 @@ func (server *Server) tickets(writer http.ResponseWriter, request *http.Request)
 		}
 		archiveFilter = value == "true"
 	}
-	query := "SELECT " + ticketColumns + " FROM tickets WHERE project_id=? AND id>? AND (?='' OR instr(lower(title),lower(?))>0) AND archived=?"
-	arguments := []any{projectID, after, search, search, archiveFilter}
+	labelFilter := ""
+	if value := request.URL.Query().Get("label"); value != "" {
+		canonical, ok := normalizeLabel(value)
+		if !ok {
+			server.fail(writer, &problem{400, "label must be 1–32 bytes of letters, digits, or single hyphens"})
+			return
+		}
+		labelFilter = canonical
+	}
+	query := "SELECT " + ticketColumns + " FROM tickets WHERE project_id=? AND id>? AND (?='' OR instr(lower(title),lower(?))>0) AND archived=? AND (?='' OR EXISTS (SELECT 1 FROM json_each(tickets.labels) WHERE value=?))"
+	arguments := []any{projectID, after, search, search, archiveFilter, labelFilter, labelFilter}
 	if value, supplied := request.URL.Query()["parent_id"]; supplied {
 		if len(value) != 1 {
 			server.fail(writer, &problem{400, "Supply one positive parent_id"})
@@ -565,6 +616,7 @@ type ticketInput struct {
 	Status      *string         `json:"status"`
 	Archived    *bool           `json:"archived"`
 	Assignee    *string         `json:"assignee"`
+	Labels      *[]string       `json:"labels"`
 	ParentID    json.RawMessage `json:"parent_id"`
 }
 
@@ -643,6 +695,13 @@ func (server *Server) createTicket(writer http.ResponseWriter, request *http.Req
 		if !slices.Contains(project.Statuses, status) {
 			return nil, &problem{400, "Status does not belong to this project"}
 		}
+		labels := []string{}
+		if input.Labels != nil {
+			labels, err = validateTicketLabels(*input.Labels, project.Labels)
+			if err != nil {
+				return nil, err
+			}
+		}
 		var count int
 		if err := transaction.QueryRowContext(request.Context(), "SELECT COUNT(*) FROM tickets").Scan(&count); err != nil {
 			return nil, err
@@ -658,13 +717,17 @@ func (server *Server) createTicket(writer http.ResponseWriter, request *http.Req
 		if input.Assignee != nil {
 			assignee = *input.Assignee
 		}
+		storedLabels, err := json.Marshal(labels)
+		if err != nil {
+			return nil, err
+		}
 		createdAt := time.Now().UTC().Format(time.RFC3339Nano)
-		result, err := transaction.ExecContext(request.Context(), "INSERT INTO tickets(project_id,title,description,status,created_at,updated_at,assignee,parent_id) VALUES(?,?,?,?,?,?,?,?)", projectID, strings.TrimSpace(*input.Title), description, status, createdAt, createdAt, assignee, parentID)
+		result, err := transaction.ExecContext(request.Context(), "INSERT INTO tickets(project_id,title,description,status,created_at,updated_at,assignee,parent_id,labels) VALUES(?,?,?,?,?,?,?,?,?)", projectID, strings.TrimSpace(*input.Title), description, status, createdAt, createdAt, assignee, parentID, string(storedLabels))
 		if err != nil {
 			return nil, err
 		}
 		id, err := result.LastInsertId()
-		return Ticket{ID: id, ProjectID: projectID, Title: strings.TrimSpace(*input.Title), Description: description, Status: status, Version: 1, CreatedAt: createdAt, UpdatedAt: createdAt, Assignee: assignee, ParentID: parentID}, err
+		return Ticket{ID: id, ProjectID: projectID, Title: strings.TrimSpace(*input.Title), Description: description, Status: status, Version: 1, CreatedAt: createdAt, UpdatedAt: createdAt, Assignee: assignee, ParentID: parentID, Labels: labels}, err
 	})
 	if err != nil {
 		server.fail(writer, err)
@@ -693,7 +756,7 @@ func (server *Server) updateTicket(writer http.ResponseWriter, request *http.Req
 		server.fail(writer, &problem{400, "Parent is fixed at creation; existing tickets cannot be reparented"})
 		return
 	}
-	if input.Title == nil && input.Description == nil && input.Status == nil && input.Archived == nil && input.Assignee == nil {
+	if input.Title == nil && input.Description == nil && input.Status == nil && input.Archived == nil && input.Assignee == nil && input.Labels == nil {
 		server.fail(writer, &problem{400, "No ticket fields supplied"})
 		return
 	}
@@ -720,15 +783,23 @@ func (server *Server) updateTicket(writer http.ResponseWriter, request *http.Req
 		if input.Description != nil {
 			ticket.Description = *input.Description
 		}
-		if input.Status != nil {
+		if input.Status != nil || input.Labels != nil {
 			project, err := readProject(transaction.QueryRowContext(request.Context(), "SELECT "+projectColumns+" FROM projects WHERE id=?", projectID))
 			if err != nil {
 				return nil, err
 			}
-			if !slices.Contains(project.Statuses, *input.Status) {
-				return nil, &problem{400, "Status does not belong to this project"}
+			if input.Status != nil {
+				if !slices.Contains(project.Statuses, *input.Status) {
+					return nil, &problem{400, "Status does not belong to this project"}
+				}
+				ticket.Status = *input.Status
 			}
-			ticket.Status = *input.Status
+			if input.Labels != nil {
+				ticket.Labels, err = validateTicketLabels(*input.Labels, project.Labels)
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
 		if input.Archived != nil {
 			ticket.Archived = *input.Archived
@@ -738,7 +809,11 @@ func (server *Server) updateTicket(writer http.ResponseWriter, request *http.Req
 		}
 		ticket.Version++
 		ticket.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-		_, err = transaction.ExecContext(request.Context(), "UPDATE tickets SET title=?,description=?,status=?,version=?,updated_at=?,archived=?,assignee=? WHERE project_id=? AND id=?", ticket.Title, ticket.Description, ticket.Status, ticket.Version, ticket.UpdatedAt, ticket.Archived, ticket.Assignee, projectID, ticketID)
+		storedLabels, err := json.Marshal(ticket.Labels)
+		if err != nil {
+			return nil, err
+		}
+		_, err = transaction.ExecContext(request.Context(), "UPDATE tickets SET title=?,description=?,status=?,version=?,updated_at=?,archived=?,assignee=?,labels=? WHERE project_id=? AND id=?", ticket.Title, ticket.Description, ticket.Status, ticket.Version, ticket.UpdatedAt, ticket.Archived, ticket.Assignee, string(storedLabels), projectID, ticketID)
 		return ticket, err
 	})
 	if err != nil {

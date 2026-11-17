@@ -1095,7 +1095,8 @@ func TestSubticketMigrationFromV2AndRollback(t *testing.T) {
 			requireStatus(t, call(fixture.handler, "PATCH", path, `{"assignee":"Preserved owner","archived":true}`, ticket.Version), 200)
 			before := call(fixture.handler, "GET", path, "", 0).Body.String()
 			history := call(fixture.handler, "GET", path+"/history", "", 0).Body.String()
-			if _, err := fixture.store.database.Exec("DROP INDEX tickets_parent; ALTER TABLE tickets DROP COLUMN parent_id; PRAGMA user_version=2;"); err != nil {
+			// Rebuild a genuine v2 schema: later columns must be gone or the fixture is not v2.
+			if _, err := fixture.store.database.Exec("DROP INDEX tickets_parent; ALTER TABLE tickets DROP COLUMN parent_id; ALTER TABLE tickets DROP COLUMN labels; ALTER TABLE projects DROP COLUMN labels; PRAGMA user_version=2;"); err != nil {
 				t.Fatal(err)
 			}
 			if obstructed {

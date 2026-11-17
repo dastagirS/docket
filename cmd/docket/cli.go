@@ -224,7 +224,7 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 	registerClientFlags(flags, &command)
 	var projectID, version, after, parentID int64
 	var limit int
-	var query, inputPath string
+	var query, inputPath, labelFilter string
 	var archived bool
 	fields := map[string]*string{}
 	if noun == "ticket" || noun == "comment" || noun == "events" {
@@ -240,6 +240,7 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 			flags.StringVar(&query, "q", "", "Substring title search")
 			flags.BoolVar(&archived, "archived", false, "Select archived tickets instead of active tickets")
 			flags.Int64Var(&parentID, "parent", 0, "Filter direct subtickets of this parent")
+			flags.StringVar(&labelFilter, "label", "", "Filter tickets carrying this project label")
 		}
 	}
 	if write && action != "archive" && action != "restore" {
@@ -247,12 +248,12 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 		var names []string
 		switch noun {
 		case "project":
-			names = []string{"name", "statuses"}
+			names = []string{"name", "statuses", "labels"}
 			if action == "create" {
 				names = append(names, "key")
 			}
 		case "ticket":
-			names = []string{"title", "description", "status", "assignee"}
+			names = []string{"title", "description", "status", "assignee", "labels"}
 			if action == "create" {
 				flags.Int64Var(&parentID, "parent", 0, "Create a subticket of an existing top-level ticket")
 			}
@@ -263,6 +264,9 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 			description := "Set " + name
 			if name == "statuses" {
 				description = "Ordered JSON string array; project updates require name and statuses together"
+			}
+			if name == "labels" {
+				description = "JSON string array of project labels; tickets accept only labels this project defines"
 			}
 			if name == "assignee" {
 				description = "Set free-text assignee; an explicit empty value unassigns"
@@ -379,6 +383,9 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 			if seen["parent"] {
 				parameters.Set("parent_id", strconv.FormatInt(parentID, 10))
 			}
+			if labelFilter != "" {
+				parameters.Set("label", labelFilter)
+			}
 		}
 		command.path += "?" + parameters.Encode()
 	}
@@ -391,10 +398,10 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 			if !utf8.ValidString(*value) {
 				return command, "", errors.New("Field values must be valid UTF-8")
 			}
-			if name == "statuses" {
-				var statuses []string
-				if json.Unmarshal([]byte(*value), &statuses) != nil || statuses == nil {
-					return command, "", errors.New("Statuses must be a JSON string array")
+			if name == "statuses" || name == "labels" {
+				var list []string
+				if json.Unmarshal([]byte(*value), &list) != nil || list == nil {
+					return command, "", errors.New("Statuses and labels must be JSON string arrays")
 				}
 				body[name] = json.RawMessage(*value)
 			} else {

@@ -235,6 +235,31 @@ dialog::backdrop{background:#0008;backdrop-filter:blur(3px)}
 .ticket-title{font-size:23px;letter-spacing:-.7px;font-weight:650;background:transparent;border:1px solid transparent;padding:10px 12px;resize:none;line-height:1.4;margin-bottom:18px;width:100%}
 .status-label{display:flex;align-items:center;gap:16px;color:var(--muted);margin:0 0 27px}
 .status-label select{width:auto;min-width:145px;font-size:12px;margin:0;padding:8px 12px}
+.label-field{margin:0 0 27px}
+.field-label{display:block;font-size:12px;font-weight:500;color:var(--muted);margin-bottom:8px}
+.label-picker{display:flex;flex-wrap:wrap;gap:7px}
+.label-chip{display:inline-flex;align-items:center;gap:5px;border:1px solid #302e34;background:#1b1a1e;border-radius:5px;padding:4px 7px;font-size:10px;line-height:1.4;color:#b9b6c1;font-weight:500;max-width:100%;overflow-wrap:anywhere}
+.label-chip.small{font-size:9px;padding:2px 5px;border-radius:4px}
+.label-chip.selectable{cursor:pointer;transition:background .12s,border-color .12s,color .12s}
+.label-chip.selectable:hover{background:#252329;border-color:#4a4453;color:#e6e2ee}
+.label-chip.selected{border-color:#8d7cb8;background:#332a45;color:#e7def7}
+.label-chip.removable{padding-right:2px}
+.label-remove{display:grid;place-items:center;width:18px;height:18px;padding:0;border-radius:4px;color:#8f88a0}
+.label-remove .icon{width:11px;height:11px}
+.label-remove:hover{background:#3a2a42;color:#f0c6d6}
+.card-labels{display:flex;flex-wrap:wrap;gap:4px;margin-top:9px}
+.list-labels{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.labels-section{border-top:1px solid var(--border);padding-top:18px;margin:24px 0}
+.label-chips{display:flex;flex-wrap:wrap;align-items:center;gap:7px;min-height:26px}
+.label-empty{font-size:11px}
+.label-add{display:flex;gap:8px;margin-top:12px}
+.label-add input{flex:1;min-width:0;padding:8px 10px;font-size:12px}
+.label-add button{flex-shrink:0;font-size:11px}
+#label-error:empty{display:none}
+#label-error:not(:empty){margin:8px 0 0}
+.filter-label{margin:0}
+.filter-label select{width:auto;min-width:104px;max-width:150px;margin:0;padding:6px 8px;font-size:11px;border-color:transparent;background:transparent;color:var(--muted)}
+.filter-label select:hover{background:#171719}
 .ticket-parent{display:flex;align-items:center;gap:10px;margin-bottom:20px;font-size:11px}
 .subtickets{border-top:1px solid var(--border);padding-top:24px;margin-top:26px}
 .subtickets .section-heading{margin-bottom:14px}

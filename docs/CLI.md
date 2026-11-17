@@ -111,14 +111,14 @@ These commands do not parse server configuration, contact HTTP, or open SQLite. 
 | `doctor` | Read `/healthz` and require status `ok` |
 | `project init` | Create a project and home-registry folder binding; repeat with keep/create/archive choice |
 | `project list` | List projects, including archived projects |
-| `project create` | `--name`, `--key`, optional `--statuses` JSON string array |
+| `project create` | `--name`, `--key`, optional `--statuses` and `--labels` JSON string arrays |
 | `project get ID` | Read a project and version |
-| `project update ID` | `--name` and `--statuses` together, plus `--version` |
+| `project update ID` | `--name` and `--statuses` together, and/or `--labels`, plus `--version` |
 | `project archive ID`, `project restore ID` | Version-checked reversible archival |
 | `ticket list --project ID` | Active tickets, including subtickets |
-| `ticket create --project ID` | `--title`, optional `--description`, `--status`, `--assignee`, `--parent` |
+| `ticket create --project ID` | `--title`, optional `--description`, `--status`, `--assignee`, `--labels`, `--parent` |
 | `ticket get ID --project ID` | Read a ticket and version |
-| `ticket update ID --project ID` | Supplied `--title`, `--description`, `--status`, `--assignee`, plus `--version` |
+| `ticket update ID --project ID` | Supplied `--title`, `--description`, `--status`, `--assignee`, `--labels`, plus `--version` |
 | `ticket archive ID --project ID`, `ticket restore ID --project ID` | Version-checked reversible archival |
 | `ticket history ID --project ID` | Read immutable change history |
 | `comment list TICKET --project ID` | Read discussion |
@@ -128,7 +128,7 @@ These commands do not parse server configuration, contact HTTP, or open SQLite. 
 
 Use the specific command's `--help` to discover flags. IDs are positive numeric IDs, not project keys or ticket references. Ticket/comment/event commands require either explicit `--project` or a folder binding in the home registry. Existing-record mutations still require explicit `--version`.
 
-All list/history commands accept `--after` and `--limit` (1–100). Each invocation retrieves one page, returning `next_cursor`; there is no hidden pagination, polling, acknowledgement, or cursor persistence. Ticket lists also accept `--q`, `--parent`, and `--archived` (archived-only instead of active-only). Keep the same filters when advancing a cursor.
+All list/history commands accept `--after` and `--limit` (1–100). Each invocation retrieves one page, returning `next_cursor`; there is no hidden pagination, polling, acknowledgement, or cursor persistence. Ticket lists also accept `--q`, `--label`, `--parent`, and `--archived` (archived-only instead of active-only). Keep the same filters when advancing a cursor.
 
 ## Mutations and subtickets
 

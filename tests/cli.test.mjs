@@ -69,14 +69,20 @@ isolatedTest("CLI real service: doctor, project/ticket commands, subtickets, ver
   };
   try {
     assert.equal((await command(["doctor"])).status, "ok");
-    const project = await command(["project", "create", "--name", "CLI board", "--key", "CLI", "--statuses", '["Queue","Building","Done"]']);
+    const project = await command(["project", "create", "--name", "CLI board", "--key", "CLI", "--statuses", '["Queue","Building","Done"]', "--labels", '["ui","api"]']);
+    assert.deepEqual(project.labels, ["ui", "api"], "Project labels must round-trip in their declared order");
     const scope = ["--project", String(project.id)];
     assert.equal((await command(["project", "list"])).items[0].id, project.id);
     assert.equal((await command(["project", "get", String(project.id)])).key, "CLI");
-    const parent = await command(["ticket", "create", ...scope, "--title", "Parent", "--description", "Keep this", "--assignee", "Morgan"]);
+    const parent = await command(["ticket", "create", ...scope, "--title", "Parent", "--description", "Keep this", "--assignee", "Morgan", "--labels", '["UI"]']);
+    assert.deepEqual(parent.labels, ["ui"], "Ticket labels normalize to the project's casing");
     const child = await command(["ticket", "create", ...scope, "--title", "Child", "--parent", String(parent.id)]);
     assert.equal(child.parent_id, parent.id);
     assert.equal((await command(["ticket", "list", ...scope, "--parent", String(parent.id)])).items[0].id, child.id);
+    assert.deepEqual((await command(["ticket", "list", ...scope, "--label", "ui"])).items.map(item => item.id), [parent.id]);
+    const invented = await command(["ticket", "create", ...scope, "--title", "Invented label", "--labels", '["perf"]'], 2);
+    assert.match(invented.error.message, /Unknown labels: "perf".*defines: ui, api/);
+    assert.equal((await command(["ticket", "list", ...scope, "--label", "perf"])).items.length, 0);
     const first = await command(["ticket", "list", ...scope, "--limit", "1", "--json"]);
     assert.equal(first.items[0].id, parent.id);
     assert.equal((await command(["ticket", "list", ...scope, "--after", String(first.next_cursor)])).items[0].id, child.id);
@@ -88,6 +94,14 @@ isolatedTest("CLI real service: doctor, project/ticket commands, subtickets, ver
     const cleared = await command(["ticket", "update", String(parent.id), ...scope, "--version", "1", "--assignee", ""]);
     assert.equal(cleared.assignee, "");
     assert.equal(cleared.description, "Keep this", "Omitted PATCH flags must preserve fields");
+    assert.deepEqual(cleared.labels, ["ui"], "Omitted PATCH flags must preserve labels");
+    const blocked = await command(["project", "update", String(project.id), "--labels", '["api"]', "--version", String(project.version)], 4);
+    assert.equal(blocked.error.code, "conflict");
+    assert.match(blocked.error.message, /Remove label ui from its tickets/);
+    const unlabelled = await command(["ticket", "update", String(parent.id), ...scope, "--version", "2", "--labels", "[]"]);
+    assert.deepEqual(unlabelled.labels, []);
+    const trimmed = await command(["project", "update", String(project.id), "--labels", '["api"]', "--version", String(project.version)]);
+    assert.deepEqual(trimmed.labels, ["api"], "An unused label may be removed from the project");
     const comment = await command(["comment", "add", String(child.id), ...scope, "--version", String(moved.version), "--body", "Ready\nSecond line", "--actor", "Test agent"]);
     assert.equal(comment.comment.actor, "Test agent");
     assert.equal((await command(["comment", "list", String(child.id), ...scope])).items[0].body, "Ready\nSecond line");
@@ -109,7 +123,8 @@ isolatedTest("CLI real service: doctor, project/ticket commands, subtickets, ver
     const other = await command(["project", "create", "--name", "Other", "--key", "OTHER"]);
     assert.equal((await command(["ticket", "get", String(child.id), "--project", String(other.id)], 3)).error.code, "not_found");
     await command(["ticket", "create", ...scope, "--title", "Too deep", "--parent", String(child.id)], 2);
-    const renamed = await command(["project", "update", String(project.id), "--name", "Renamed", "--statuses", '["Queue","Building","Done"]', "--version", String(project.version)]);
+    const renamed = await command(["project", "update", String(project.id), "--name", "Renamed", "--statuses", '["Queue","Building","Done"]', "--version", String(trimmed.version)]);
+    assert.deepEqual(renamed.labels, ["api"], "Omitted label flags must preserve project labels");
     const archivedProject = await command(["project", "archive", String(project.id), "--version", String(renamed.version)]);
     assert.equal(archivedProject.archived, true);
     assert.equal((await command(["project", "restore", String(project.id), "--version", String(archivedProject.version)])).archived, false);

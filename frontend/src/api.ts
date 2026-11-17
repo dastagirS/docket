@@ -2,6 +2,9 @@ export const PAGE_SIZE = 100;
 export const TICKETS_VISIBLE_MAX = 1000;
 export const ACTIVITY_VISIBLE_MAX = 500;
 export const STATUSES_MAX = 12;
+export const LABELS_MAX = 32;
+export const TICKET_LABELS_MAX = 8;
+export const LABEL_BYTES_MAX = 32;
 export const STATUS_BYTES_MAX = 100;
 export const ASSIGNEE_BYTES_MAX = 100;
 export const COMMENT_CHARACTERS_MAX = 2000;
@@ -13,6 +16,7 @@ export interface Project {
   name: string;
   key: string;
   statuses: string[];
+  labels: string[];
   version: number;
   created_at: string;
   archived: boolean;
@@ -29,6 +33,7 @@ export interface Ticket {
   archived: boolean;
   assignee: string;
   parent_id: number | null;
+  labels: string[];
 }
 export interface Comment {
   id: number;
@@ -64,16 +69,20 @@ function integer(value: unknown, minimum = 1): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum) throw new Error("Invalid server identifier or version");
   return value;
 }
+function labelList(value: unknown, maximum: number): string[] {
+  if (!Array.isArray(value) || value.length > maximum) throw new Error("Invalid server labels");
+  return value.map(text);
+}
 export function readProject(value: unknown): Project {
   const item = record(value);
   if (!Array.isArray(item.statuses) || item.statuses.length < 1 || item.statuses.length > STATUSES_MAX) throw new Error("Invalid project statuses");
   if (typeof item.archived !== "boolean") throw new Error("Invalid project archive state");
-  return { id: integer(item.id), name: text(item.name), key: text(item.key), statuses: item.statuses.map(text), version: integer(item.version), created_at: text(item.created_at), archived: item.archived };
+  return { id: integer(item.id), name: text(item.name), key: text(item.key), statuses: item.statuses.map(text), labels: labelList(item.labels, LABELS_MAX), version: integer(item.version), created_at: text(item.created_at), archived: item.archived };
 }
 export function readTicket(value: unknown): Ticket {
   const item = record(value);
   if (typeof item.archived !== "boolean") throw new Error("Invalid ticket archive state");
-  return { id: integer(item.id), project_id: integer(item.project_id), title: text(item.title), description: text(item.description), status: text(item.status), version: integer(item.version), created_at: text(item.created_at), updated_at: text(item.updated_at), archived: item.archived, assignee: text(item.assignee), parent_id: item.parent_id === null ? null : integer(item.parent_id) };
+  return { id: integer(item.id), project_id: integer(item.project_id), title: text(item.title), description: text(item.description), status: text(item.status), version: integer(item.version), created_at: text(item.created_at), updated_at: text(item.updated_at), archived: item.archived, assignee: text(item.assignee), parent_id: item.parent_id === null ? null : integer(item.parent_id), labels: labelList(item.labels, TICKET_LABELS_MAX) };
 }
 export function readComment(value: unknown): Comment {
   const item = record(value);

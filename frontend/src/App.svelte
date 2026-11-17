@@ -14,6 +14,7 @@
   let tickets: Ticket[] = [];
   let view: "board" | "list" = "board";
   let search = "";
+  let labelFilter = "";
   let cursor = 0;
   let more = false;
   let loadingMore = false;
@@ -116,6 +117,8 @@
   }
   async function loadProject(projectID: number, visibleCount = PAGE_SIZE): Promise<boolean> {
     finishTicketDrag();
+    // A label filter belongs to one project's vocabulary; carrying it across projects would hide every ticket.
+    if (project && project.id !== projectID && labelFilter) labelFilter = "";
     const currentGeneration = ++generation;
     loadingProject = true;
     try {
@@ -125,14 +128,14 @@
       if (currentGeneration !== generation) return false;
       const [loaded, firstPage] = await Promise.all([
         api(projectPath(projectID), {}, readProject),
-        api(`${projectPath(projectID)}/tickets?archived=${archiveFilter}&q=${encodeURIComponent(search)}`, {}, readPage(readTicket)),
+        api(`${projectPath(projectID)}/tickets?archived=${archiveFilter}&q=${encodeURIComponent(search)}&label=${encodeURIComponent(labelFilter)}`, {}, readPage(readTicket)),
       ]);
       let page = firstPage;
       const loadedTickets = [...page.items];
       const pageCount = Math.min(Math.max(1, Math.ceil(visibleCount / PAGE_SIZE)), TICKETS_VISIBLE_MAX / PAGE_SIZE);
       for (let i = 1; i < pageCount && page.items.length === PAGE_SIZE; i++) {
         if (currentGeneration !== generation) return false;
-        page = await api(`${projectPath(projectID)}/tickets?after=${page.next_cursor}&archived=${archiveFilter}&q=${encodeURIComponent(search)}`, {}, readPage(readTicket));
+        page = await api(`${projectPath(projectID)}/tickets?after=${page.next_cursor}&archived=${archiveFilter}&q=${encodeURIComponent(search)}&label=${encodeURIComponent(labelFilter)}`, {}, readPage(readTicket));
         loadedTickets.push(...page.items);
       }
       if (currentGeneration !== generation) return false;
@@ -150,6 +153,7 @@
     if (!ticketDialog.close()) return;
     clearTimeout(searchTimer);
     search = "";
+    labelFilter = "";
     if (await loadProject(projectID)) history.pushState({}, "", `/projects/${projectID}`);
   }
   async function refresh(): Promise<void> {
@@ -193,6 +197,7 @@
   async function projectSaved(saved: Project): Promise<void> {
     await loadProjects();
     search = "";
+    labelFilter = "";
     if (await loadProject(saved.id)) history.pushState({}, "", `/projects/${saved.id}`);
   }
   function searchChanged(): void {
@@ -209,7 +214,7 @@
     const currentGeneration = generation;
     loadingMore = true;
     try {
-      const page = await api(`${projectPath(project.id)}/tickets?after=${cursor}&archived=${showArchivedTickets}&q=${encodeURIComponent(search)}`, {}, readPage(readTicket));
+      const page = await api(`${projectPath(project.id)}/tickets?after=${cursor}&archived=${showArchivedTickets}&q=${encodeURIComponent(search)}&label=${encodeURIComponent(labelFilter)}`, {}, readPage(readTicket));
       if (currentGeneration !== generation) return;
       const existing = new Set(tickets.map((ticket) => ticket.id));
       tickets = [...tickets, ...page.items.filter((ticket) => !existing.has(ticket.id))].slice(0, TICKETS_VISIBLE_MAX);
@@ -261,7 +266,7 @@
     <div class="view-switch" aria-label="Ticket view"><button id="board-view" aria-pressed={view === "board"} onclick={() => { view = "board"; }}><Icon name="board" /> Board</button><button id="list-view" aria-pressed={view === "list"} onclick={() => { view = "list"; }}><Icon name="list" /> List</button></div>
     <div class="view-switch" aria-label="Ticket visibility"><button id="active-tickets" aria-pressed={!showArchivedTickets} onclick={() => run(() => ticketVisibility(false))}>Active</button><button id="archived-tickets" aria-pressed={showArchivedTickets} onclick={() => run(() => ticketVisibility(true))}><Icon name="archive" /> Archived</button></div>
     <span id="ticket-count" class="muted">{tickets.length}{more ? "+" : ""} {tickets.length === 1 && !more ? "ticket" : "tickets"}</span>
-    <div class="toolbar-right"><label class="search-label"><Icon name="search" /><input id="search" type="search" placeholder="Search tickets…" aria-label="Search tickets" maxlength="200" bind:value={search} oninput={searchChanged}></label><button id="refresh" class="quiet" aria-label="Refresh tickets" onclick={() => run(refresh)}><Icon name="refresh" /> Refresh</button></div>
+    <div class="toolbar-right"><label class="filter-label"><span class="sr-only">Filter by label</span><select id="label-filter" bind:value={labelFilter} disabled={loadingProject} onchange={() => { if (project) run(() => loadProject(project!.id)); }}><option value="">All labels</option>{#each project?.labels ?? [] as label (label)}<option value={label}>{label}</option>{/each}</select></label><label class="search-label"><Icon name="search" /><input id="search" type="search" placeholder="Search tickets…" aria-label="Search tickets" maxlength="200" bind:value={search} oninput={searchChanged}></label><button id="refresh" class="quiet" aria-label="Refresh tickets" onclick={() => run(refresh)}><Icon name="refresh" /> Refresh</button></div>
   </div>
   <section id="welcome" class="welcome" hidden={!!project}><span class="welcome-mark">d</span><h2>Your work, in one place.</h2><p>A small board. A clear next step.<br>Create a project to start keeping track.</p><button id="welcome-new" class="primary" onclick={() => projectDialog.open(null)}><Icon name="plus" /> Create a project</button><span class="welcome-note">Simple by design. Yours to host.</span></section>
   <section id="content" aria-label="Tickets" class={view} aria-busy={loadingProject || movingTicketID !== null} hidden={!project}>
@@ -279,6 +284,7 @@
                   <div class="card-top"><span class="mono">{project.key}-{ticket.id}</span><Icon name="arrow-up-right" /></div>
                   <div class="card-title">{ticket.title}</div>
                   {#if ticket.parent_id !== null}<span id={`card-parent-${ticket.id}`} class="card-parent">Subticket of {project.key}-{ticket.parent_id}</span>{/if}
+                  {#if ticket.labels.length}<div class="card-labels">{#each ticket.labels as label (label)}<span class="label-chip small">{label}</span>{/each}</div>{/if}
                   <div class="card-footer"><Icon name="clock" />{new Date(ticket.updated_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}{#if ticket.assignee}<span id={`card-assignee-${ticket.id}`} class="card-assignee" title={`Assigned to ${ticket.assignee}`}><Icon name="user" /><span>{ticket.assignee}</span></span>{/if}</div>
                 </button>
               {:else}<div class="column-empty">{dropStatus === status ? "Drop ticket here" : "No tickets here"}</div>{/each}
@@ -289,7 +295,7 @@
       {:else}
         <table class="list-table"><thead><tr><th>Ticket</th><th>Title</th><th class="assignee-column">Assignee</th><th>Status</th></tr></thead><tbody>
           {#each tickets as ticket (ticket.id)}
-            <tr><td class="mono muted">{project.key}-{ticket.id}</td><td><button class="list-ticket" onclick={() => run(() => ticketDialog.open(project!, ticket.id))}>{ticket.title}</button>{#if ticket.parent_id !== null}<span class="card-parent">Subticket of {project.key}-{ticket.parent_id}</span>{/if}</td><td class="list-assignee">{ticket.assignee || "Unassigned"}</td><td><span class="list-status"><span class={`status-dot tone-${project.statuses.indexOf(ticket.status) % 5}`}></span>{ticket.status}</span></td></tr>
+            <tr><td class="mono muted">{project.key}-{ticket.id}</td><td><button class="list-ticket" onclick={() => run(() => ticketDialog.open(project!, ticket.id))}>{ticket.title}</button>{#if ticket.parent_id !== null}<span class="card-parent">Subticket of {project.key}-{ticket.parent_id}</span>{/if}{#if ticket.labels.length}<span class="list-labels">{#each ticket.labels as label (label)}<span class="label-chip small">{label}</span>{/each}</span>{/if}</td><td class="list-assignee">{ticket.assignee || "Unassigned"}</td><td><span class="list-status"><span class={`status-dot tone-${project.statuses.indexOf(ticket.status) % 5}`}></span>{ticket.status}</span></td></tr>
           {/each}
         </tbody></table>
         {#if !tickets.length}<p class="empty-activity">No tickets found. Create one or try another search.</p>{/if}

@@ -38,8 +38,8 @@ Project operations:
 | Action | Arguments |
 | --- | --- |
 | `project init` | `--name`, `--key`, `--on-existing keep\|create\|archive`; see above |
-| `project create` | `--name`, `--key`, optional `--statuses` JSON string array |
-| `project update ID` | `--version`, `--name` and `--statuses` together |
+| `project create` | `--name`, `--key`, optional `--statuses` and `--labels` JSON string arrays |
+| `project update ID` | `--version`, `--name` and `--statuses` together, and/or `--labels` |
 | `project archive ID` | `--version` |
 | `project restore ID` | `--version` |
 
@@ -55,8 +55,8 @@ docket ticket history "$ticket_id" --project "$project_id" --server "$docket_url
 
 | Action | Fields |
 | --- | --- |
-| `ticket create --project ID` | Required `--title`; optional `--description`, `--status`, `--assignee`, `--parent` |
-| `ticket update TICKET --project ID` | `--version` and supplied `--title`, `--description`, `--status`, `--assignee` |
+| `ticket create --project ID` | Required `--title`; optional `--description`, `--status`, `--assignee`, `--labels`, `--parent` |
+| `ticket update TICKET --project ID` | `--version` and supplied `--title`, `--description`, `--status`, `--assignee`, `--labels` |
 | `ticket archive TICKET --project ID` | `--version` |
 | `ticket restore TICKET --project ID` | `--version` |
 
@@ -91,6 +91,7 @@ All list/history commands accept `--after` (nonnegative cursor) and `--limit` (1
 Ticket lists default to active tickets, including children. Additional flags:
 
 - `--q TEXT`: substring title search.
+- `--label NAME`: tickets carrying one project label.
 - `--parent ID`: direct children of that same-project parent.
 - `--archived` or `--archived=true`: archived-only. `--archived=false` selects active-only. Do not use the unsupported space-separated boolean form `--archived true`.
 
