@@ -16,6 +16,8 @@ V1 has no accounts, sessions, API keys, or project-level authorization. Anyone w
 
 The first generic builder used Go 1.27.2. Its binary scan flagged GO-2026-6809 / CVE-2026-111943 in `crypto/x509.Certificate.Verify`, despite clean source scans. The builder and minimum Go requirement were raised to 1.27.3; the final binary scan passed. The flagged binary is not the final artifact. A later source scan flagged GO-2026-6859, a `net/http` `MaxBytesReader` header race that the server uses, so the builder and minimum Go requirement were raised again to 1.27.4; the final binary scan passes.
 
+Self-update verification reads Go build metadata without executing the candidate. Because release builds use `-trimpath` and Go omits `-ldflags` from recorded settings under that flag (go.dev/issue/52372), the release version is also stamped as a `docketversion_*` build tag; the updater requires that exact tag for the selected release, alongside the checksum, architecture, and module-path checks. A test builds fixtures with the real release flag set so this contract cannot silently drift again.
+
 The base-image digest freezes the base, not external Alpine repositories. `apk upgrade` intentionally applies current signed repository updates, and explicit compiler/musl versions fail if unavailable. Capture and review resolved versions on every release and rerun native advisory checks whenever packages change. `make security` repeats Go checks; it does not replace native dependency review.
 
 ## Frontend migration

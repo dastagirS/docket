@@ -245,18 +245,36 @@ func verifyUpdateBinary(ctx context.Context, file *os.File, version, system, arc
 	if err != nil || information.Path != "docket/cmd/docket" {
 		return errors.New("Release does not contain Docket Go build metadata")
 	}
+	marker := buildVersionTag(version)
 	for _, setting := range information.Settings {
-		if setting.Key != "-ldflags" {
+		if setting.Key != "-tags" {
 			continue
 		}
-		fields := strings.Fields(setting.Value)
-		for i := 1; i < len(fields); i++ {
-			if fields[i-1] == "-X" && fields[i] == "main.buildVersion="+version {
+		for _, tag := range strings.Split(setting.Value, ",") {
+			if tag == marker {
 				return nil
 			}
 		}
 	}
 	return errors.New("Release binary version does not match the selected release")
+}
+
+// buildVersionTag names the build tag that release builds stamp into the executable.
+// Release builds pass -trimpath, and Go then omits -ldflags from the recorded build
+// metadata on purpose (go.dev/issue/52372), so the version travels as a build tag,
+// which is always recorded.
+func buildVersionTag(version string) string {
+	var tag strings.Builder
+	tag.WriteString("docketversion_")
+	for _, character := range version {
+		switch {
+		case character >= 'a' && character <= 'z', character >= 'A' && character <= 'Z', character >= '0' && character <= '9':
+			tag.WriteRune(character)
+		default:
+			tag.WriteByte('_')
+		}
+	}
+	return tag.String()
 }
 
 func (updater selfUpdater) update(ctx context.Context, force bool) (result updateResult, resultError error) {

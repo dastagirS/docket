@@ -64,12 +64,85 @@ func (transport updateTransport) RoundTrip(request *http.Request) (*http.Respons
 
 var updateAssetName, _ = updateAssetFor(runtime.GOOS, runtime.GOARCH)
 
+func TestReleaseBuildTagVerification(t *testing.T) {
+	if tag := buildVersionTag("v0.0.7"); tag != "docketversion_v0_0_7" {
+		t.Fatalf("version tag %q, want docketversion_v0_0_7", tag)
+	}
+	if tag := buildVersionTag("dev"); tag != "docketversion_dev" {
+		t.Fatalf("development tag %q, want docketversion_dev", tag)
+	}
+	// Go omits -ldflags from build metadata under -trimpath, so the version must travel as a
+	// build tag. Fail if a release build stops stamping it.
+	checked := 0
+	for _, name := range []string{"Dockerfile", filepath.Join(".github", "workflows", "checks.yml")} {
+		payload, err := os.ReadFile(filepath.Join("..", "..", name))
+		if errors.Is(err, os.ErrNotExist) {
+			continue // The Docker test stage copies source files only.
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		checked++
+		if !strings.Contains(string(payload), "docketversion_$(printf") {
+			t.Fatalf("%s does not stamp the release version as a build tag", name)
+		}
+	}
+	if checked == 0 {
+		t.Log("Release build definitions are outside this build context; stamping is asserted where the repository is available.")
+	}
+
+	directory := t.TempDir()
+	build := func(version string, stamped bool) string {
+		t.Helper()
+		path := filepath.Join(directory, fmt.Sprintf("%s-%t", version, stamped))
+		tags := "netgo osusergo sqlite_omit_load_extension"
+		if stamped {
+			tags += " " + buildVersionTag(version)
+		}
+		command := exec.Command("go", "build", "-trimpath", "-tags", tags, "-ldflags", "-s -w -X main.buildVersion="+version, "-o", path, ".")
+		command.Env = append(os.Environ(), "GOMAXPROCS=2")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("build fixture: %v %s", err, output)
+		}
+		if runtime.GOOS == "darwin" {
+			if output, err := exec.Command("/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", path).CombinedOutput(); err != nil {
+				t.Fatalf("sign fixture: %v %s", err, output)
+			}
+		}
+		return path
+	}
+	verify := func(path, version string) error {
+		t.Helper()
+		file, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		return verifyUpdateBinary(ctx, file, version, runtime.GOOS, runtime.GOARCH)
+	}
+
+	stamped := build("v0.0.7", true)
+	if err := verify(stamped, "v0.0.7"); err != nil {
+		t.Fatalf("a release build stamped with its own version must verify: %v", err)
+	}
+	if err := verify(stamped, "v0.0.6"); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("a binary stamped for another version must be rejected, got %v", err)
+	}
+	if err := verify(build("v0.0.7", false), "v0.0.7"); err == nil {
+		t.Fatal("a binary without the release version tag must be rejected")
+	}
+}
+
 func TestSelfUpdate(t *testing.T) {
 	directory := t.TempDir()
 	build := func(version string) []byte {
 		t.Helper()
 		path := filepath.Join(directory, version)
-		command := exec.Command("go", "build", "-ldflags", "-X main.buildVersion="+version, "-o", path, ".")
+		// Fixtures must use the release flag set, including -trimpath and the stamped version tag,
+		// or they would not prove that a published release verifies.
+		command := exec.Command("go", "build", "-trimpath", "-tags", "netgo osusergo sqlite_omit_load_extension "+buildVersionTag(version), "-ldflags", "-s -w -X main.buildVersion="+version, "-o", path, ".")
 		command.Env = append(os.Environ(), "GOMAXPROCS=2")
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("build candidate: %v %s", err, output)

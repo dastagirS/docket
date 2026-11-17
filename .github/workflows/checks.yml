@@ -90,7 +90,8 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: '14.0'
         run: |
           mkdir "$RUNNER_TEMP/docket-build"
-          go build -trimpath -tags 'netgo osusergo sqlite_omit_load_extension' -ldflags "-s -w -X main.buildVersion=$BUILD_VERSION" -o "$RUNNER_TEMP/docket-build/docket" ./cmd/docket
+          VERSION_TAG="docketversion_$(printf '%s' "$BUILD_VERSION" | sed 's/[^A-Za-z0-9]/_/g')"
+          go build -trimpath -tags "netgo osusergo sqlite_omit_load_extension $VERSION_TAG" -ldflags "-s -w -X main.buildVersion=$BUILD_VERSION" -o "$RUNNER_TEMP/docket-build/docket" ./cmd/docket
           codesign --force --sign - --timestamp=none "$RUNNER_TEMP/docket-build/docket"
           codesign --verify --strict "$RUNNER_TEMP/docket-build/docket"
       - name: Native macOS vulnerability checks

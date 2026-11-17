@@ -27,6 +27,7 @@ The API suite covers transactional mutation/event rollback, immutable history/re
 | Host-specific binary | ELF check failed on x86-64-v4 requirements | Generic ELF check and baseline-emulated DB/API tests pass |
 | Go toolchain advisory | Binary scan flagged GO-2026-6809 in Go 1.27.2 | Final Go 1.27.3 binary scan passes |
 | Go toolchain advisory | Source scan flagged GO-2026-6859 in Go 1.27.3 | Final Go 1.27.4 binary scan passes |
+| Self-update verification | Real v0.0.6 release rejected: `-trimpath` makes Go omit `-ldflags`, so the version assertion never matched | Version stamped as a build tag; release-flag fixtures verify acceptance and rejection |
 
 Negative execution of the original binary under baseline QEMU emitted `Illegal instruction` but the emulator did not exit cleanly; those attempts were timed out/removed and are not clean exit-code regression proof. The bounded ELF assertion is the authoritative failing-before portability check. Positive execution of the final binary and tests completed normally.
 
