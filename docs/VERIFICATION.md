@@ -4,7 +4,7 @@ Date: 2026-10-26. Scope: standalone Docket v1, not the future Pi integration. Th
 
 ## Final passing checks
 
-- `make test`: 14 API/store tests with Go's race detector, plus vet, in the pinned Go 1.27.3 builder.
+- `make test`: API/store tests with Go's race detector, plus vet, in the pinned Go 1.27.4 builder.
 - `make verify-portable`: actual SQLite initialization/backup and the same 14 tests under QEMU's baseline `qemu64` CPU model. These emulated tests do not use the race detector; native builder tests do.
 - `node --test tests/browser.test.mjs`: two real-application tests pass. One drives a uniquely named Chromium session through project/ticket creation, comments, status changes, board/list views, stored-text safety, delayed-navigation races, stale project forms, phone-width creation, and visible refresh failures. The other kills/restarts real processes and verifies event replay and backup restoration.
 - `make security`: module, package, and final binary scans with pinned govulncheck v1.9.0 pass. Module checksums verified. Native builder package-feed comparison: 31 packages, 184 version comparisons, zero older-than-fixed findings. See SECURITY.md for coverage limits.
@@ -26,6 +26,7 @@ The API suite covers transactional mutation/event rollback, immutable history/re
 | Phone-width project creation | Action had no layout rectangle / was hidden | Action visible and real form submission exercised |
 | Host-specific binary | ELF check failed on x86-64-v4 requirements | Generic ELF check and baseline-emulated DB/API tests pass |
 | Go toolchain advisory | Binary scan flagged GO-2026-6809 in Go 1.27.2 | Final Go 1.27.3 binary scan passes |
+| Go toolchain advisory | Source scan flagged GO-2026-6859 in Go 1.27.3 | Final Go 1.27.4 binary scan passes |
 
 Negative execution of the original binary under baseline QEMU emitted `Illegal instruction` but the emulator did not exit cleanly; those attempts were timed out/removed and are not clean exit-code regression proof. The bounded ELF assertion is the authoritative failing-before portability check. Positive execution of the final binary and tests completed normally.
 

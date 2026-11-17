@@ -6,7 +6,7 @@ For everyday commands, see [CLI](CLI.md). For release automation and installatio
 
 ## Run the service
 
-Requires Docker/BuildKit and Make to build. Pinned builders supply Node 24, Go 1.27.3, and the C compiler; no host Node/Go/compiler installation is needed. The output is a baseline Linux amd64 executable, verified under QEMU's `qemu64` CPU model. This Docker target builds Linux x86-64. Releases also include a native Apple Silicon macOS artifact; Intel macOS, Linux ARM64, and Windows are not shipped.
+Requires Docker/BuildKit and Make to build. Pinned builders supply Node 24, Go 1.27.4, and the C compiler; no host Node/Go/compiler installation is needed. The output is a baseline Linux amd64 executable, verified under QEMU's `qemu64` CPU model. This Docker target builds Linux x86-64. Releases also include a native Apple Silicon macOS artifact; Intel macOS, Linux ARM64, and Windows are not shipped.
 
 ```sh
 make build
@@ -71,7 +71,7 @@ make build                      # Docker builds frontend, then embeds it in Go
 
 ## Native Apple Silicon build
 
-Requires Apple Silicon macOS, Go 1.27.3, Node 24, and Xcode command-line tools for SQLite CGO. Build dependencies are not runtime dependencies. CI uses the native `macos-15` ARM64 runner with deployment target macOS 14.
+Requires Apple Silicon macOS, Go 1.27.4, Node 24, and Xcode command-line tools for SQLite CGO. Build dependencies are not runtime dependencies. CI uses the native `macos-15` ARM64 runner with deployment target macOS 14.
 
 ```sh
 npm --prefix frontend ci
@@ -125,4 +125,4 @@ Default Docker test/build stages run `svelte-check` before bundling. Gated relea
 
 Browser tests launch disposable real servers and a uniquely named browser session. They never attach to an existing user browser. Set `DOCKET_SCREENSHOTS=/absolute/path` to retain desktop/phone screenshots. They also test process-kill recovery and backup restoration. No additional npm installation is required for browser tests after the Docker build.
 
-The only application module dependency is pinned `github.com/mattn/go-sqlite3 v1.14.52`, bundling SQLite 3.53.4. No transitive Go modules. Native musl is supplied by the builder. Builder package/security updates must be reviewed; a pinned image does not freeze external Alpine repositories. See [Security](SECURITY.md) and [Verification](VERIFICATION.md) for evidence and limits. Tests do not establish production-scale performance, every possible failure, or compatibility with every Linux kernel. If building without Docker for local development, use Go 1.27.3+ and a patched C toolchain; host-specific native libraries can make that build nonportable.
+The only application module dependency is pinned `github.com/mattn/go-sqlite3 v1.14.52`, bundling SQLite 3.53.4. No transitive Go modules. Native musl is supplied by the builder. Builder package/security updates must be reviewed; a pinned image does not freeze external Alpine repositories. See [Security](SECURITY.md) and [Verification](VERIFICATION.md) for evidence and limits. Tests do not establish production-scale performance, every possible failure, or compatibility with every Linux kernel. If building without Docker for local development, use Go 1.27.4+ and a patched C toolchain; host-specific native libraries can make that build nonportable.

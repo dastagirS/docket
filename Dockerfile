@@ -11,7 +11,7 @@ RUN case "$FRONTEND_CHECK" in \
     esac
 
 # The builder must not inherit the host's optimized libc or CPU requirements.
-FROM golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS toolchain
+FROM golang:1.27.4-alpine3.24@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS toolchain
 RUN apk upgrade --no-cache && apk add --no-cache gcc=15.2.0-r5 musl=1.2.6-r3 musl-dev=1.2.6-r3 binutils=2.45.1-r1
 ENV CGO_ENABLED=1 GOOS=linux GOARCH=amd64 GOAMD64=v1 GOTOOLCHAIN=local GOMAXPROCS=2
 ENV CGO_CFLAGS="-O2 -march=x86-64 -mtune=generic"

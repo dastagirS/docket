@@ -9,12 +9,12 @@ V1 has no accounts, sessions, API keys, or project-level authorization. Anyone w
 ## Application and native runtime
 
 - Application module: `github.com/mattn/go-sqlite3 v1.14.52`; SQLite 3.53.4. No transitive Go modules. Go module checksum verification passed.
-- Builder: `golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c`, selected for Linux amd64.
+- Builder: `golang:1.27.4-alpine3.24@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280`, selected for Linux amd64.
 - Compiler/native runtime pins: GCC 15.2.0-r5, musl and musl-dev 1.2.6-r3, binutils 2.45.1-r1. The Alpine r3 musl package includes published security fixes missing in earlier revisions.
 - Builder updates installed before compilation; the resolved 31-package inventory was compared with Alpine v3.24 main's security feed using 184 `apk version` comparisons. Zero installed versions older than the listed fix versions were found. This is feed-based comparison, not an independent whole-toolchain source audit.
 - Final `govulncheck v1.9.0` module, package (including tests/build tags), and **binary** scans all passed. Go scanners do not independently analyze SQLite C or musl. SQLite's published CVE table, release information, upstream advisories, and the native package feed were reviewed separately.
 
-The first generic builder used Go 1.27.2. Its binary scan flagged GO-2026-6809 / CVE-2026-111943 in `crypto/x509.Certificate.Verify`, despite clean source scans. The builder and minimum Go requirement were raised to 1.27.3; the final binary scan passed. The flagged binary is not the final artifact.
+The first generic builder used Go 1.27.2. Its binary scan flagged GO-2026-6809 / CVE-2026-111943 in `crypto/x509.Certificate.Verify`, despite clean source scans. The builder and minimum Go requirement were raised to 1.27.3; the final binary scan passed. The flagged binary is not the final artifact. A later source scan flagged GO-2026-6859, a `net/http` `MaxBytesReader` header race that the server uses, so the builder and minimum Go requirement were raised again to 1.27.4; the final binary scan passes.
 
 The base-image digest freezes the base, not external Alpine repositories. `apk upgrade` intentionally applies current signed repository updates, and explicit compiler/musl versions fail if unavailable. Capture and review resolved versions on every release and rerun native advisory checks whenever packages change. `make security` repeats Go checks; it does not replace native dependency review.
 
