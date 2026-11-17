@@ -163,12 +163,12 @@ async function confirm() {
 async function main() {
   const arguments_ = process.argv.slice(2);
   if (arguments_.length === 1 && ["--help", "-h"].includes(arguments_[0])) {
-    writeOutput("Usage: ./scripts/release.sh [patch|minor|major]\n\nDefault: patch. Preview and confirm an atomic master+tag push to origin.\nRequires Node 24+ and Git. No auto-commit, force-push, tag reuse, or retry.\nA pushed tag triggers CI; publication still requires both platform jobs to pass.");
+    writeOutput("Usage: ./scripts/release.sh [patch|minor|major|hotfix]\n\nDefault: patch. Preview and confirm an atomic master+tag push to origin.\nhotfix advances the patch version like patch and labels the tag as a hotfix; tags are never reused.\nRequires Node 24+ and Git. No auto-commit, force-push, tag reuse, or retry.\nA pushed tag triggers CI; publication still requires both platform jobs to pass.");
     return;
   }
   const bump = arguments_[0] ?? "patch";
-  if (arguments_.length > 1 || !["patch", "minor", "major"].includes(bump)) {
-    throw new Error("Use ./scripts/release.sh [patch|minor|major].");
+  if (arguments_.length > 1 || !["patch", "minor", "major", "hotfix"].includes(bump)) {
+    throw new Error("Use ./scripts/release.sh [patch|minor|major|hotfix].");
   }
   if (Number(process.versions.node.split(".")[0]) < 24) throw new Error("Release requires Node 24+.");
   if (await realpath(await git(["rev-parse", "--show-toplevel"])) !== await realpath(repositoryDirectory)) {
@@ -188,12 +188,13 @@ async function main() {
   }
   const highest = highestVersion([...localTags, ...remote.keys()]);
   const version = [...highest];
-  const index = { major: 0, minor: 1, patch: 2 }[bump];
+  // A hotfix is an ordinary patch release: same version arithmetic, only the label differs.
+  const index = { major: 0, minor: 1, patch: 2, hotfix: 2 }[bump];
   version[index] += 1n;
   for (let i = index + 1; i < version.length; i++) version[i] = 0n;
   const tag = "v" + version.join(".");
   if (tag.length > versionBytesMax) throw new Error("The next version exceeds the release version limit.");
-  writeOutput(`Release: ${tag}\nCommit:  ${commit}\nBranch:  master\nRemote:  origin (dastagirS/docket)\nLocal and remote stable tags, including failed releases, reserve their versions.`);
+  writeOutput(`${bump === "hotfix" ? "Hotfix" : "Release"}: ${tag}\nCommit:  ${commit}\nBranch:  master\nRemote:  origin (dastagirS/docket)\nLocal and remote stable tags, including failed releases, reserve their versions.`);
   if (!await confirm()) {
     writeOutput("Cancelled. No tag created or push attempted.");
     return;
@@ -207,7 +208,7 @@ async function main() {
       highestVersion([...refreshed.keys()]).join(".") !== highestVersion([...remote.keys()]).join(".")) {
     throw new Error("Origin changed during confirmation. Nothing was pushed; rerun to review a fresh preview.");
   }
-  await git(["tag", "-a", tag, "-m", `Docket ${tag}`, commit]);
+  await git(["tag", "-a", tag, "-m", `Docket ${tag}${bump === "hotfix" ? " (hotfix)" : ""}`, commit]);
   createdTag = tag;
   const tagObject = await git(["rev-parse", `refs/tags/${tag}`]);
   if (!objectPattern.test(tagObject) || await git(["rev-parse", `refs/tags/${tag}^{commit}`]) !== commit) {

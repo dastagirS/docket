@@ -56,9 +56,12 @@ Use the release helper from a clean, committed `master` checkout. It needs Git a
 
 ```sh
 ./scripts/release.sh          # next patch version
+./scripts/release.sh hotfix   # next patch version, annotated as a hotfix
 ./scripts/release.sh minor    # next minor version
 ./scripts/release.sh major    # next major version
 ```
+
+`hotfix` uses the same version arithmetic as `patch` and adds `(hotfix)` to the annotated tag message. It is a label, not tag reuse: a published version is never re-cut, moved, or overwritten, so `docket update` keeps a single unambiguous meaning for every version.
 
 The helper finds the highest stable `vMAJOR.MINOR.PATCH` tag across local Git and `origin`, including tags whose CI builds failed. It previews the next version and exact commit, then asks for confirmation (default: no). Versions are stamped from the tag by CI; no version files or commits are generated. Origin must be this Docket repository, with matching fetch/push URLs, including their resolved destinations after Git URL rewrites. The helper refuses dirty or detached checkouts, other branches, unfinished Git operations, and a remote master not contained in the local commit.
 

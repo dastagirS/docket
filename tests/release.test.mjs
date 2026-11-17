@@ -84,8 +84,8 @@ async function remoteRefs(fixture) {
   return fixture.git("--git-dir", fixture.remote, "for-each-ref", "--format=%(refname) %(objectname)");
 }
 
-test("release script computes patch/minor/major from all local and remote stable tags", { timeout: 60000 }, async () => {
-  for (const [arguments_, tag] of [[[], "v0.0.10"], [["minor"], "v0.1.0"], [["major"], "v1.0.0"]]) {
+test("release script computes patch/minor/major/hotfix from all local and remote stable tags", { timeout: 60000 }, async () => {
+  for (const [arguments_, tag, label] of [[[], "v0.0.10", "Release"], [["minor"], "v0.1.0", "Release"], [["major"], "v1.0.0", "Release"], [["hotfix"], "v0.0.10", "Hotfix"]]) {
     const setup = await fixture();
     try {
       await setup.git("tag", "v0.0.2", setup.base);
@@ -95,7 +95,9 @@ test("release script computes patch/minor/major from all local and remote stable
       const previousTags = await setup.git("show-ref", "--tags");
       const result = await release(setup, { arguments_ });
       assert.equal(result.code, 0, result.stderr);
-      assert.match(result.stdout, new RegExp(`Release: ${tag.replaceAll(".", "\\.")}`));
+      assert.match(result.stdout, new RegExp(`${label}: ${tag.replaceAll(".", "\\.")}`));
+      const annotation = await setup.git("tag", "--list", "--format=%(contents)", tag);
+      assert.equal(annotation.includes("(hotfix)"), label === "Hotfix", "Only a hotfix tag carries the hotfix label");
       assert.match(result.stdout, /publication|publish/);
       assert.equal(await setup.git("--git-dir", setup.remote, "rev-parse", "refs/heads/master"), setup.commit);
       assert.equal(await setup.git("--git-dir", setup.remote, "rev-parse", `refs/tags/${tag}^{commit}`), setup.commit);
