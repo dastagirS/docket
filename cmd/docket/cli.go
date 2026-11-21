@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -36,7 +37,8 @@ Usage:
   docket events list [--project PROJECT] [options]
   docket serve [server options]
 
-Client results are JSON on stdout; errors are JSON on stderr. Version/help/skill output is text.
+Client results are JSON on stdout. Errors are readable lines on a terminal and JSON on stderr
+when output is piped; --json forces JSON diagnostics everywhere. Version/help/skill output is text.
 Flags follow the command and its positional ID. Use COMMAND --help for flags.
 Writes to existing records require --version from a previous read.
 Use --input FILE (or - for stdin) for JSON write bodies instead of field flags.
@@ -48,6 +50,9 @@ Legacy server flags (--listen, --database, --public-url, --backup-to) still work
 `
 
 func execute(arguments []string, input io.Reader, output, diagnostics io.Writer) int {
+	if slices.Contains(arguments, "--json") || slices.Contains(arguments, "--json=true") {
+		diagnostics = jsonDiagnostics{diagnostics}
+	}
 	if len(arguments) > argumentsCountMax {
 		return emitFailure(diagnostics, errors.New("Too many arguments"))
 	}
@@ -137,11 +142,23 @@ func execute(arguments []string, input io.Reader, output, diagnostics io.Writer)
 	return 0
 }
 
+// jsonDiagnostics hides the concrete file so failures stay machine-readable even on a terminal.
+type jsonDiagnostics struct{ io.Writer }
+
 func emitFailure(output io.Writer, err error) int {
 	failure := &cliFailure{Exit: exitUsage, Code: "usage", Message: err.Error()}
 	var known *cliFailure
 	if errors.As(err, &known) {
 		failure = known
+	}
+	// A person at a terminal gets one readable line; scripts and agents keep the JSON contract.
+	if file, ok := output.(*os.File); ok {
+		if attached, inspectError := terminalAttached(file); inspectError == nil && attached {
+			if _, writeError := fmt.Fprintf(output, "docket: %s\n", failure.Message); writeError != nil {
+				return exitFailure
+			}
+			return failure.Exit
+		}
 	}
 	if err := json.NewEncoder(output).Encode(struct {
 		Error *cliFailure `json:"error"`

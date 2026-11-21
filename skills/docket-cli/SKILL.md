@@ -12,7 +12,7 @@ allowed-tools: Bash(docket:*)
 
 # Docket CLI
 
-Docket is a short-lived HTTP client of an existing service. Results are JSON on stdout; diagnostics are JSON on stderr. It does not automatically start a server or open SQLite for client commands. No runtime Node installation is needed.
+Docket is a short-lived HTTP client of an existing service. Results are JSON on stdout; diagnostics are JSON on stderr when piped or captured (use `--json` under a pseudo-terminal) and a readable line on an interactive terminal. It does not automatically start a server or open SQLite for client commands. No runtime Node installation is needed.
 
 ## Built-in discovery
 

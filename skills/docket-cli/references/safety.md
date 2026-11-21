@@ -15,7 +15,7 @@ If the user requests an integration that needs both interfaces, agree on the sco
 
 ## Exit codes and streams
 
-Success is one JSON object on stdout. Failure is a JSON diagnostic on stderr. Help is text. Always check the process exit code; discard stdout on nonzero exit, including partial output.
+Success is one JSON object on stdout. Failure is a JSON diagnostic on stderr when output is piped or captured, which is the normal agent case; pass `--json` if a pseudo-terminal is involved. Help is text. Always check the process exit code; discard stdout on nonzero exit, including partial output.
 
 | Exit | Meaning | Next step |
 | --- | --- | --- |

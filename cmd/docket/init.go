@@ -70,31 +70,40 @@ func terminalInput(input io.Reader) (bool, error) {
 	if !ok {
 		return false, nil
 	}
+	attached, err := terminalAttached(file)
+	if err != nil {
+		return false, errors.New("Cannot inspect initialization terminal")
+	}
+	return attached, nil
+}
+
+// terminalAttached reports whether a descriptor is an interactive terminal. Sockets, pipes,
+// regular files, and /dev/null are not, so machine-readable output keeps its shape there.
+func terminalAttached(file *os.File) (bool, error) {
 	information, err := file.Stat()
 	if err != nil {
-		return false, errors.New("Cannot inspect initialization input")
+		return false, err
 	}
-	// Darwin sockets need not return ENOTTY from terminal ioctls.
 	if information.Mode()&os.ModeCharDevice == 0 {
 		return false, nil
 	}
 	connection, err := file.SyscallConn()
 	if err != nil {
-		return false, errors.New("Cannot inspect initialization input")
+		return false, err
 	}
 	var status syscall.Errno
 	if err := connection.Control(func(descriptor uintptr) {
 		var settings syscall.Termios
 		_, _, status = syscall.Syscall(syscall.SYS_IOCTL, descriptor, terminalReadRequest, uintptr(unsafe.Pointer(&settings)))
 	}); err != nil {
-		return false, errors.New("Cannot inspect initialization terminal")
+		return false, err
 	}
 	// Darwin's /dev/null driver returns ENODEV for unsupported ioctls.
 	if status == syscall.ENOTTY || (runtime.GOOS == "darwin" && status == syscall.ENODEV) {
 		return false, nil
 	}
 	if status != 0 {
-		return false, errors.New("Cannot inspect initialization terminal")
+		return false, err
 	}
 	return true, nil
 }

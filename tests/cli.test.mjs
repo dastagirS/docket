@@ -133,6 +133,48 @@ isolatedTest("CLI real service: doctor, project/ticket commands, subtickets, ver
   }
 });
 
+isolatedTest("CLI errors are readable lines on a terminal and JSON when piped or with --json", { timeout: 30000 }, async () => {
+  const script = `
+import json, os, pty, subprocess, sys
+binary = sys.argv[1]
+arguments = ["ticket", "get", "1", "--project", "1", "--server", "http://127.0.0.1:1"]
+def read_all(master):
+    chunks = []
+    while True:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+def run(extra, terminal):
+    command = [binary, *arguments, *extra]
+    if not terminal:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        return {"code": result.returncode, "stderr": result.stderr.decode()}
+    master, slave = pty.openpty()
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=slave, timeout=10)
+    finally:
+        os.close(slave)
+    captured = read_all(master)
+    os.close(master)
+    return {"code": result.returncode, "stderr": captured.decode()}
+print(json.dumps({"terminal": run([], True), "pipe": run([], False), "forced": run(["--json"], True)}))
+`;
+  const { stdout } = await execute("python3", ["-c", script, binary], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax, env: { ...process.env, HOME: homeContext.getStore(), DOCKET_ACTOR: "" } });
+  const results = JSON.parse(stdout);
+  assert.equal(results.terminal.code, 5);
+  assert.match(results.terminal.stderr, /^docket: /);
+  assert.ok(!results.terminal.stderr.includes("{"), "A terminal must not receive JSON diagnostics");
+  assert.equal(results.pipe.code, 5);
+  assert.equal(JSON.parse(results.pipe.stderr).error.code, "unavailable");
+  assert.equal(results.forced.code, 5);
+  assert.equal(JSON.parse(results.forced.stderr).error.code, "unavailable", "--json must force machine-readable diagnostics");
+});
+
 isolatedTest("CLI help and invalid/unavailable requests never create a local database", { timeout: 30000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "docket-cli-no-database-"));
   try {
