@@ -135,33 +135,52 @@ isolatedTest("CLI real service: doctor, project/ticket commands, subtickets, ver
 
 isolatedTest("CLI errors are readable lines on a terminal and JSON when piped or with --json", { timeout: 30000 }, async () => {
   const script = `
-import json, os, pty, subprocess, sys
+import json, os, pty, select, subprocess, sys, time
 binary = sys.argv[1]
 arguments = ["ticket", "get", "1", "--project", "1", "--server", "http://127.0.0.1:1"]
-def read_all(master):
-    chunks = []
+def drain(master, chunks):
     while True:
+        ready, _, _ = select.select([master], [], [], 0)
+        if not ready:
+            return
         try:
             chunk = os.read(master, 4096)
         except OSError:
-            break
+            return
         if not chunk:
-            break
+            return
         chunks.append(chunk)
-    return b"".join(chunks)
 def run(extra, terminal):
     command = [binary, *arguments, *extra]
     if not terminal:
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
         return {"code": result.returncode, "stderr": result.stderr.decode()}
+    # Keep the parent's slave open and poll the master. Closing the slave right after the
+    # child exits discards queued output on macOS, which made this assertion fail there.
     master, slave = pty.openpty()
     try:
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=slave, timeout=10)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=slave)
+        chunks = []
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.2)
+            if ready:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                continue
+            if process.poll() is not None:
+                break
+        code = process.wait(timeout=10)
+        drain(master, chunks)
+        return {"code": code, "stderr": b"".join(chunks).decode()}
     finally:
         os.close(slave)
-    captured = read_all(master)
-    os.close(master)
-    return {"code": result.returncode, "stderr": captured.decode()}
+        os.close(master)
 print(json.dumps({"terminal": run([], True), "pipe": run([], False), "forced": run(["--json"], True)}))
 `;
   const { stdout } = await execute("python3", ["-c", script, binary], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax, env: { ...process.env, HOME: homeContext.getStore(), DOCKET_ACTOR: "" } });
