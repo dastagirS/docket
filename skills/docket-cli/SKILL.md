@@ -71,6 +71,7 @@ Read the new version from every successful write before another mutation. Do not
 - `project init` creates a project and records its folder in the home registry; it is not an attach/claim/start action. Repeat choices are keep (default), create another, or archive-and-replace. Noninteractive repeats require `--on-existing keep|create|archive`; create/archive need explicit approval and a new unique key. See the command reference before initializing.
 - A `~/.docket/init.lock` journal means init is pending/incomplete: stop and reconcile with the human. Never delete it or repeat writes automatically. The registry does not modify Pi pins or ownership rules.
 - Flags follow the command and its positional ID. IDs are numeric, not references such as `WEB-12`.
+- `attachment add` uploads one image file (PNG, JPEG, or GIF, 5 MiB max) with no version bump; `attachment list` and `attachment delete` cover the rest. Never base64-encode image bytes into a description.
 - JSON is already the default; `--json` is optional. Check the exit status before parsing stdout. Never hide errors with `|| true` or parse a partial result after failure.
 - Use `--input FILE` or `--input -` for one UTF-8 JSON write object instead of complicated shell interpolation. Do not combine it with field flags. Keep `--version` outside the JSON body. Close stdin after sending the object.
 - Lists return one page, at most 100 items, with `next_cursor`. Keep filters unchanged while paging. Follow only as many pages as the task needs; no polling loops, unbounded collection, or automatic event pickup.

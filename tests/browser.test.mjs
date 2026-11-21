@@ -1662,3 +1662,60 @@ test("ticket editor: pinned chrome, safe focus-to-edit Markdown, preserved draft
     try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
   }
 });
+
+test("images: upload, render in the description, delete, and reject non-images", { timeout: 60000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-images-"));
+  const session = `docket-images-${process.pid}`;
+  const server = await startServer(join(directory, "test.sqlite"));
+  const browser = async (...arguments_) => (await execute("agent-browser", ["--session", session, ...arguments_], { timeout: commandTimeoutMs, maxBuffer: outputBytesMax })).stdout;
+  // A synthetic File exercises the same fetch upload path as a picked or pasted image.
+  const attach = (base64, name, type) => `(() => {
+    const bytes = Uint8Array.from(atob(${JSON.stringify(base64)}), character => character.charCodeAt(0));
+    const input = document.getElementById('image-input');
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], ${JSON.stringify(name)}, { type: ${JSON.stringify(type)} }));
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return 'SENT';
+  })()`;
+  try {
+    const project = await request(server.origin, "/api/projects", "POST", { name: "Images", key: "IMG" });
+    const ticket = await request(server.origin, `/api/projects/${project.id}/tickets`, "POST", { title: "Screenshot" });
+    const path = `/api/projects/${project.id}/tickets/${ticket.id}`;
+    await browser("open", `${server.origin}/projects/${project.id}`);
+    await browser("eval", "window.confirm = () => true; true");
+    await browser("click", `[data-ticket-id="${ticket.id}"]`);
+    await browser("wait", "--fn", "document.getElementById('attachments') !== null");
+    assert.match(await browser("eval", "!document.getElementById('add-image').disabled && document.querySelector('#attachments .empty-activity').textContent.includes('No images yet')"), /true/);
+
+    await browser("eval", attach("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "shot.png", "image/png"));
+    await browser("wait", "--fn", "document.querySelector('.attachment img')?.naturalWidth > 0");
+    const reference = `![shot.png](/api/projects/${project.id}/tickets/${ticket.id}/attachments/1)`;
+    assert.match(await browser("eval", `document.getElementById('ticket-description').value.includes(${JSON.stringify(reference)})`), /true/, "Uploading must insert the image Markdown");
+    assert.equal((await request(server.origin, `${path}/attachments`)).items.length, 1);
+    await browser("click", "#save-ticket");
+    await browser("wait", "--fn", "document.querySelector('#description-preview img')?.naturalWidth > 0");
+    assert.equal((await request(server.origin, path)).description, reference + "\n");
+    assert.equal((await request(server.origin, path)).version, 2);
+    if (process.env.DOCKET_SCREENSHOTS) {
+      await mkdir(process.env.DOCKET_SCREENSHOTS, { recursive: true });
+      await browser("eval", "document.getElementById('attachments').scrollIntoView({block:'center'}); true");
+      await browser("screenshot", join(process.env.DOCKET_SCREENSHOTS, "ticket-images-1440.png"));
+    }
+
+    await browser("eval", attach("bm90IGFuIGltYWdl", "notes.txt", "text/plain"));
+    await browser("wait", "--fn", "document.getElementById('attachment-error').textContent.includes('Only PNG, JPEG, or GIF')");
+    assert.equal((await request(server.origin, `${path}/attachments`)).items.length, 1, "A rejected file must not be stored");
+
+    await browser("click", ".attachment-actions button[aria-label^='Remove']");
+    await browser("wait", "--fn", "document.querySelectorAll('.attachment').length === 0");
+    assert.equal((await request(server.origin, `${path}/attachments`)).items.length, 0);
+    assert.match(await browser("eval", "document.getElementById('ticket-description').value.includes('attachments/1')"), /false/, "Removing an image must drop its reference");
+    assert.equal((await request(server.origin, path)).description, reference + "\n", "The description stays unsaved until the footer saves it");
+    await browser("click", "#save-ticket");
+    await browser("wait", "--fn", "!document.getElementById('save-ticket').disabled && document.getElementById('ticket-description').hidden");
+    assert.equal((await request(server.origin, path)).description, "");
+  } finally {
+    try { await browser("close"); } finally { await stopServer(server); await rm(directory, { recursive: true, force: true }); }
+  }
+});

@@ -2,7 +2,7 @@
 
 Base URL: your configured origin, e.g. `http://127.0.0.1:7331`. No accounts, tokens, or API keys. All exposed API operations are available to anyone who can reach it.
 
-JSON writes require `Content-Type: application/json`; unknown fields, trailing JSON, invalid/oversized UTF-8 text, and cross-project ticket references are rejected. Descriptions and comments are stored and returned as text. The browser renders description Markdown with raw HTML and embedded images disabled; comments remain plain text. `X-Docket-Actor` is an optional display label, default `Owner`, **not authenticated attribution**. Clients may spoof it; do not use it for authorization.
+JSON writes require `Content-Type: application/json`; unknown fields, trailing JSON, invalid/oversized UTF-8 text, and cross-project ticket references are rejected. Descriptions and comments are stored and returned as text. The browser renders description Markdown with raw HTML disabled; the only images it renders are the ticket's own attachments, referenced by their `/api/.../attachments/{id}` path. Comments remain plain text. `X-Docket-Actor` is an optional display label, default `Owner`, **not authenticated attribution**. Clients may spoof it; do not use it for authorization.
 
 ## Routes
 
@@ -15,6 +15,8 @@ JSON writes require `Content-Type: application/json`; unknown fields, trailing J
 | GET, POST | `/api/projects/{project}/tickets` | List/create tickets |
 | GET, PATCH | `/api/projects/{project}/tickets/{ticket}` | Read/update ticket |
 | GET, POST | `/api/projects/{project}/tickets/{ticket}/comments` | List/append comments |
+| GET, POST | `/api/projects/{project}/tickets/{ticket}/attachments` | List image metadata/upload one image |
+| GET, DELETE | `/api/projects/{project}/tickets/{ticket}/attachments/{attachment}` | Read image bytes/delete one image |
 | GET | `/api/projects/{project}/tickets/{ticket}/history` | Immutable ticket change history |
 | GET | `/api/projects/{project}/events` | Durable project change feed |
 
@@ -38,7 +40,18 @@ curl -X PATCH -H 'Content-Type: application/json' -H 'If-Match: "1"' \
 curl -H 'Content-Type: application/json' -H 'If-Match: "2"' \
   -d '{"body":"Implementation ready for review"}' \
   http://127.0.0.1:7331/api/projects/1/tickets/1/comments
+
+curl --data-binary @failure.png -H 'Content-Type: application/octet-stream' \
+  'http://127.0.0.1:7331/api/projects/1/tickets/1/attachments?filename=failure.png'
 ```
+
+## Images
+
+Image bytes live inside the SQLite database, so one backup file stays complete. Uploads are the raw request body, not JSON: `Content-Type` is ignored and the type is derived from the bytes. PNG, JPEG, and GIF are accepted; SVG and HTML are rejected because they can carry script. Limits: 5 MiB per image, 8 per ticket, 12000 pixels per side, and a 512 MiB database cap that fails closed. `filename` is a display label only (1–120 bytes, no slashes or control characters); nothing is written to the filesystem.
+
+An upload returns `201` with `{id, project_id, ticket_id, filename, content_type, bytes, sha256, actor, created_at, url}` and records an `attachment.created` event. Uploading or deleting an image does **not** bump the ticket version: an image is content, not a state transition, so an open editor is not forced to reload. Deleting records `attachment.deleted` and returns `{deleted: true, attachment: {…}}`.
+
+`GET …/attachments/{attachment}` returns the bytes with the detected content type, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`, `Cache-Control: private, max-age=31536000, immutable`, and an `ETag` equal to the SHA-256 digest; `If-None-Match` returns `304`. To embed an image in a description, write `![name](/api/projects/{project}/tickets/{ticket}/attachments/{attachment})`; any other image source renders as its escaped alt text.
 
 Project creation: `name`, unique case-normalized `key` (2–10 ASCII letters/digits), optional `statuses` (ordered string array), and optional `labels` (ordered string array, empty by default). Default statuses are documented in README. Projects expose `archived` (initially `false`). Project PATCH accepts `name` and `statuses` together, `labels`, an `archived` boolean, or a combination. Key cannot change. Removing a status or label in use returns `409`; move its tickets first. `{"archived":true}` archives and `{"archived":false}` restores, with the usual `If-Match` precondition.
 

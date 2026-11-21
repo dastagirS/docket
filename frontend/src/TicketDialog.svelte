@@ -2,7 +2,7 @@
   import { onDestroy, tick } from "svelte";
   import Icon from "./Icon.svelte";
   import { renderDescription } from "./markdown";
-  import { api, ApiError, errorMessage, ACTIVITY_VISIBLE_MAX, ASSIGNEE_BYTES_MAX, COMMENT_CHARACTERS_MAX, PAGE_SIZE, TICKET_LABELS_MAX, TICKETS_VISIBLE_MAX, projectPath, ticketPath, readTicket, readPage, readComment, readEvent, readCommentResult, dateLabel, type Project, type Ticket, type Comment, type ChangeEvent } from "./api";
+  import { api, ApiError, errorMessage, ACTIVITY_VISIBLE_MAX, ASSIGNEE_BYTES_MAX, ATTACHMENTS_MAX, ATTACHMENT_BYTES_MAX, ATTACHMENT_TYPES, COMMENT_CHARACTERS_MAX, PAGE_SIZE, TICKET_LABELS_MAX, TICKETS_VISIBLE_MAX, attachmentsPath, projectPath, ticketPath, uploadAttachment, readTicket, readPage, readAttachment, readComment, readEvent, readCommentResult, dateLabel, type Project, type Ticket, type Attachment, type Comment, type ChangeEvent } from "./api";
 
   export let onsaved: (projectID: number) => Promise<void>;
   export let notify: (message: string) => void;
@@ -14,7 +14,13 @@
   let description = "";
   let descriptionInput: HTMLTextAreaElement;
   let descriptionEditing = true;
-  $: descriptionHTML = descriptionEditing ? "" : renderDescription(description);
+  let attachments: Attachment[] = [];
+  let attachmentsLoading = false;
+  let attachmentUploading = false;
+  let attachmentError = "";
+  let fileInput: HTMLInputElement;
+  $: attachmentPaths = attachments.map(attachmentPath).filter((value) => value !== "");
+  $: descriptionHTML = descriptionEditing ? "" : renderDescription(description, attachmentPaths);
   $: commentCharacters = Array.from(commentBody).length;
   $: commentTooLong = commentCharacters > COMMENT_CHARACTERS_MAX;
   let status = "";
@@ -39,7 +45,7 @@
   let reload = false;
   let generation = 0;
   let observedVersion = 0;
-  const descriptions: Record<string, string> = { "ticket.created": "created this ticket", "ticket.updated": "updated this ticket", "comment.created": "added a comment" };
+  const descriptions: Record<string, string> = { "ticket.created": "created this ticket", "ticket.updated": "updated this ticket", "comment.created": "added a comment", "attachment.created": "attached an image", "attachment.deleted": "removed an image" };
 
   export function close(): boolean {
     if (pending) return false;
@@ -76,6 +82,10 @@
     historyMore = false;
     commentsLoading = false;
     historyLoading = false;
+    attachments = [];
+    attachmentsLoading = false;
+    attachmentUploading = false;
+    attachmentError = "";
     ticketError = "";
     commentError = "";
     reload = false;
@@ -83,7 +93,7 @@
     if (currentGeneration !== generation) return;
     dialog.showModal();
     titleInput.focus();
-    if (ticket) await Promise.all([loadComments(), loadHistory(), loadSubtickets()]);
+    if (ticket) await Promise.all([loadComments(), loadHistory(), loadSubtickets(), loadAttachments()]);
   }
   export async function sync(selected: Project): Promise<void> {
     if (!dialog.open || pending || commentsLoading || historyLoading || subticketsLoading || !ticket || project?.id !== selected.id) return;
@@ -107,7 +117,7 @@
       reload = false;
       ticketError = "";
     }
-    await Promise.all([loadComments(false, comments.length), loadHistory(false, history.length)]);
+    await Promise.all([loadComments(false, comments.length), loadHistory(false, history.length), loadAttachments()]);
     if (currentGeneration === generation) observedVersion = loaded.version;
   }
   async function loadSubtickets(more = false, visibleCount = PAGE_SIZE): Promise<void> {
@@ -181,6 +191,79 @@
     } finally { if (currentGeneration === generation) historyLoading = false; }
   }
   function run(action: () => Promise<void>): void { action().catch((failure: unknown) => notify(errorMessage(failure))); }
+  // The dialog renders its own origin's attachment path; the server URL may use a public host.
+  function attachmentPath(attachment: Attachment): string {
+    try { return new URL(attachment.url, window.location.origin).pathname; } catch { return ""; }
+  }
+  async function loadAttachments(): Promise<void> {
+    if (!project || !ticket || attachmentsLoading) return;
+    const currentGeneration = generation;
+    attachmentsLoading = true;
+    try {
+      const page = await api(`${attachmentsPath(project.id, ticket.id)}?limit=${ATTACHMENTS_MAX}`, {}, readPage(readAttachment));
+      if (currentGeneration !== generation) return;
+      attachments = page.items;
+    } catch (failure) {
+      if (currentGeneration === generation) attachmentError = failureMessage(failure);
+    } finally { if (currentGeneration === generation) attachmentsLoading = false; }
+  }
+  function insertAttachment(attachment: Attachment): void {
+    // Brackets in a display name would end the Markdown alt text early.
+    const reference = `![${attachment.filename.replace(/[[\]]/g, "")}](${attachmentPath(attachment)})`;
+    if (!description.includes(reference)) {
+      const trimmed = description.trimEnd();
+      description = trimmed === "" ? `${reference}\n` : `${trimmed}\n\n${reference}\n`;
+      dirty = true;
+    }
+  }
+  async function addAttachment(files: ArrayLike<File> | null | undefined): Promise<void> {
+    if (pending || attachmentUploading || !project || !ticket) return;
+    const candidates = Array.from(files ?? []);
+    if (candidates.length === 0) return;
+    const remaining = ATTACHMENTS_MAX - attachments.length;
+    if (candidates.length > remaining) {
+      attachmentError = `A ticket can hold ${ATTACHMENTS_MAX} images; ${remaining} slot(s) remain.`;
+      return;
+    }
+    attachmentUploading = true;
+    attachmentError = "";
+    try {
+      for (const file of candidates) {
+        if (!ATTACHMENT_TYPES.includes(file.type)) { attachmentError = "Only PNG, JPEG, or GIF images are supported."; continue; }
+        if (file.size > ATTACHMENT_BYTES_MAX) { attachmentError = "Images must be 5 MiB or smaller."; continue; }
+        const saved = await uploadAttachment(project.id, ticket.id, file);
+        attachments = [...attachments, saved];
+        insertAttachment(saved);
+      }
+      await loadHistory();
+    } catch (failure) { attachmentError = failureMessage(failure); }
+    finally {
+      attachmentUploading = false;
+      if (fileInput) fileInput.value = "";
+    }
+  }
+  async function removeAttachment(attachment: Attachment): Promise<void> {
+    if (pending || attachmentUploading || !project || !ticket) return;
+    if (!confirm(`Remove ${attachment.filename}? Its bytes are deleted from the database.`)) return;
+    attachmentUploading = true;
+    attachmentError = "";
+    try {
+      await api(`${attachmentsPath(project.id, ticket.id)}/${attachment.id}`, { method: "DELETE" }, () => undefined);
+      attachments = attachments.filter((item) => item.id !== attachment.id);
+      const path = attachmentPath(attachment);
+      const reference = path === "" ? null : new RegExp(`!\\[[^\\]]*\\]\\(${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)\\n?`, "g");
+      if (reference?.test(description)) { description = description.replace(reference, ""); dirty = true; }
+      await loadHistory();
+      notify("Image removed. The rest of the ticket was not changed.");
+    } catch (failure) { attachmentError = failureMessage(failure); }
+    finally { attachmentUploading = false; }
+  }
+  function attachFromClipboard(event: ClipboardEvent): void {
+    const files = Array.from(event.clipboardData?.files ?? []).filter((file) => ATTACHMENT_TYPES.includes(file.type));
+    if (files.length === 0) return;
+    event.preventDefault();
+    run(() => addAttachment(files));
+  }
   function failureMessage(failure: unknown): string {
     if (failure instanceof ApiError && failure.status === 409) reload = true;
     return errorMessage(failure) + (failure instanceof ApiError ? "" : " Reload to check the result before submitting again.");
@@ -300,10 +383,32 @@
         <button id="edit-description" class="description-edit-target" type="button" aria-label="Edit description" disabled={pending} onfocus={() => run(editDescription)} onclick={() => run(editDescription)}></button>
         <div id="description-preview" class="markdown-content" aria-labelledby="description-label">{#if description}{@html descriptionHTML}{:else}<p class="muted">Add context, requirements, or acceptance criteria…</p>{/if}</div>
       </div>
-      <textarea id="ticket-description" bind:this={descriptionInput} bind:value={description} hidden={!descriptionEditing} rows="7" maxlength="16000" placeholder="Add context, requirements, or acceptance criteria…" disabled={pending}></textarea>
+      <textarea id="ticket-description" bind:this={descriptionInput} bind:value={description} hidden={!descriptionEditing} rows="7" maxlength="16000" placeholder="Add context, requirements, or acceptance criteria…" disabled={pending} onpaste={attachFromClipboard}></textarea>
       <small>{descriptionEditing ? "Markdown supported. Save changes to render your description." : "Click or focus the description to edit Markdown."}</small>
     </div>
   </form>
+  <section id="attachments" class="attachments" aria-label="Images" aria-busy={attachmentsLoading || attachmentUploading} ondragover={(event) => event.preventDefault()} ondrop={(event) => { event.preventDefault(); run(() => addAttachment(event.dataTransfer?.files)); }}>
+    <div class="section-heading"><h3>Images <span class="muted">{attachments.length}</span></h3>
+      {#if ticket}<button id="add-image" class="quiet bordered" type="button" disabled={pending || attachmentUploading || attachments.length >= ATTACHMENTS_MAX} onclick={() => fileInput?.click()}><Icon name="plus" /> Add image</button>{/if}
+    </div>
+    {#if ticket}
+      <input id="image-input" class="sr-only" type="file" bind:this={fileInput} accept={ATTACHMENT_TYPES.join(",")} multiple onchange={(event) => run(() => addAttachment(event.currentTarget.files))} />
+      <div class="attachment-grid">
+        {#each attachments as attachment (attachment.id)}
+          <figure class="attachment" data-attachment-id={attachment.id}>
+            <img src={attachmentPath(attachment)} alt={attachment.filename} loading="lazy" />
+            <figcaption><span class="attachment-name">{attachment.filename}</span><span class="muted">{attachment.bytes < 1024 ? `${attachment.bytes} B` : `${Math.round(attachment.bytes / 1024)} KB`}</span>
+              <span class="attachment-actions"><button type="button" class="quiet" disabled={pending || attachmentUploading} onclick={() => insertAttachment(attachment)}>Insert</button><button type="button" class="quiet" aria-label={`Remove ${attachment.filename}`} disabled={pending || attachmentUploading} onclick={() => run(() => removeAttachment(attachment))}><Icon name="trash" /></button></span>
+            </figcaption>
+          </figure>
+        {:else}<p class="empty-activity">{attachmentsLoading ? "Loading images…" : "No images yet. Drop a PNG, JPEG, or GIF here, or paste one into the description."}</p>{/each}
+      </div>
+      <p id="attachment-error" class="form-error" role="alert">{attachmentError}</p>
+      <small>Images are stored inside the Docket database, so one backup file stays complete. Up to {ATTACHMENTS_MAX} per ticket, 5 MiB each.</small>
+    {:else}
+      <small class="muted">Save this ticket first, then images can be attached.</small>
+    {/if}
+  </section>
   {#if ticket && parentID === null && project}
     <section id="subtickets" class="subtickets" aria-label="Subtickets" aria-busy={subticketsLoading}>
       <div class="section-heading"><h3>Subtickets <span class="muted">{subtickets.length}{subticketsMore ? "+" : ""}</span></h3><button id="add-subticket" class="quiet bordered" disabled={pending} onclick={() => run(() => open(project!, null, project!.statuses[0], ticket!.id))}><Icon name="plus" /> Add subticket</button></div>

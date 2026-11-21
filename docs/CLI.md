@@ -125,6 +125,9 @@ These commands do not parse server configuration, contact HTTP, or open SQLite. 
 | `ticket history ID --project ID` | Read immutable change history |
 | `comment list TICKET --project ID` | Read discussion |
 | `comment add TICKET --project ID` | Append `--body`, with the current ticket's `--version` |
+| `attachment list TICKET --project ID` | Read image metadata for a ticket |
+| `attachment add TICKET --project ID` | Upload `--file` (or `-` for stdin), optional `--filename`; no `--version` needed |
+| `attachment delete TICKET --project ID` | Remove `--attachment ID`; no `--version` needed |
 | `events list --project ID` | Read one page of durable project events |
 | `serve` | Server/backup mode; see `docket serve --help` |
 
@@ -148,6 +151,18 @@ docket ticket update 12 --project 3 --version 9 --assignee ''
 docket ticket archive 12 --project 3 --version 10
 docket ticket restore 12 --project 3 --version 11
 ```
+
+## Images
+
+Attach screenshots from the shell; the bytes travel as the raw request body, so nothing is base64-encoded or pasted into JSON:
+
+```sh
+docket attachment add 12 --project 3 --file failure.png
+docket attachment list 12 --project 3
+docket attachment delete 12 --project 3 --attachment 4
+```
+
+`attachment add` returns the new metadata, including `url` and `sha256`; embed it in a description with `![failure.png](/api/projects/3/tickets/12/attachments/4)`. Files must be PNG, JPEG, or GIF, at most 5 MiB, and at most 8 per ticket. Images live in the database, so they are covered by the same one-file backup. Uploads and deletions do not change the ticket version, so no `--version` is required; a description that references a new image still needs a normal versioned `ticket update`.
 
 Omitted PATCH flags preserve their fields; explicit empty values can clear optional text. The CLI never fetches a newer version to silently rebase a write. Subtickets use the existing one-level, same-project rules. Their parent link cannot be edited; `--parent` is available only on creation and listing. Status and archive operations do not cascade.
 

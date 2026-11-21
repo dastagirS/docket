@@ -175,6 +175,43 @@ print(json.dumps({"terminal": run([], True), "pipe": run([], False), "forced": r
   assert.equal(JSON.parse(results.forced.stderr).error.code, "unavailable", "--json must force machine-readable diagnostics");
 });
 
+isolatedTest("CLI attachments: upload a PNG, list it, fetch its bytes, and delete it", { timeout: 60000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "docket-attachment-"));
+  const server = await startServer(directory);
+  const imagePath = join(directory, "sketch.png");
+  const textPath = join(directory, "notes.txt");
+  const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
+  await writeFile(imagePath, image);
+  await writeFile(textPath, "not an image");
+  const command = async (arguments_, expected = 0) => {
+    const result = await cli([...arguments_, "--server", server.origin]);
+    assert.equal(result.code, expected, result.stderr);
+    assert.equal(expected ? result.stdout : result.stderr, "", "JSON results and diagnostics must stay on separate streams");
+    return JSON.parse(expected ? result.stderr : result.stdout);
+  };
+  try {
+    const project = await command(["project", "create", "--name", "Images", "--key", "IMG"]);
+    const scope = ["--project", String(project.id)];
+    const ticket = await command(["ticket", "create", ...scope, "--title", "Screenshot of the failure"]);
+    assert.match((await command(["attachment", "add", String(ticket.id), ...scope], 2)).error.message, /Supply --file/);
+    assert.match((await command(["attachment", "add", String(ticket.id), ...scope, "--file", textPath], 2)).error.message, /Only PNG, JPEG, or GIF images/);
+    const added = await command(["attachment", "add", String(ticket.id), ...scope, "--file", imagePath, "--filename", "shot.png"]);
+    assert.equal(added.filename, "shot.png");
+    assert.equal(added.content_type, "image/png");
+    assert.equal(added.bytes, image.length);
+    assert.equal((await command(["attachment", "list", String(ticket.id), ...scope])).items.map(item => item.id).join(), String(added.id));
+    const fetched = await fetch(added.url);
+    assert.equal(fetched.status, 200);
+    assert.equal(fetched.headers.get("content-type"), "image/png");
+    assert.deepEqual(Buffer.from(await fetched.arrayBuffer()), image, "The agent must be able to read back the exact bytes it attached");
+    assert.equal((await command(["ticket", "get", String(ticket.id), ...scope])).version, ticket.version, "Uploading an image must not bump the ticket version");
+    assert.equal((await command(["attachment", "delete", String(ticket.id), ...scope, "--attachment", String(added.id)])).deleted, true);
+    assert.equal((await command(["attachment", "list", String(ticket.id), ...scope])).items.length, 0);
+  } finally {
+    try { if (server) await stopServer(server.child); } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
 isolatedTest("CLI help and invalid/unavailable requests never create a local database", { timeout: 30000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "docket-cli-no-database-"));
   try {

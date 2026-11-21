@@ -3,10 +3,17 @@ package docket
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -18,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -57,6 +65,10 @@ func NewServer(store *Store, publicURL string) (http.Handler, error) {
 	mux.HandleFunc("PATCH /api/projects/{project}/tickets/{ticket}", server.updateTicket)
 	mux.HandleFunc("GET /api/projects/{project}/tickets/{ticket}/comments", server.comments)
 	mux.HandleFunc("POST /api/projects/{project}/tickets/{ticket}/comments", server.createComment)
+	mux.HandleFunc("GET /api/projects/{project}/tickets/{ticket}/attachments", server.attachments)
+	mux.HandleFunc("POST /api/projects/{project}/tickets/{ticket}/attachments", server.createAttachment)
+	mux.HandleFunc("GET /api/projects/{project}/tickets/{ticket}/attachments/{attachment}", server.attachment)
+	mux.HandleFunc("DELETE /api/projects/{project}/tickets/{ticket}/attachments/{attachment}", server.deleteAttachment)
 	mux.HandleFunc("GET /api/projects/{project}/tickets/{ticket}/history", server.events)
 	mux.HandleFunc("GET /api/projects/{project}/events", server.events)
 	mux.HandleFunc("GET /healthz", server.health)
@@ -915,6 +927,246 @@ func (server *Server) createComment(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	server.send(writer, 201, value)
+}
+
+// Attachments carry bytes, so they are read and written outside the JSON codec and never
+// bump the ticket version: an image is content, not a state transition.
+func (server *Server) attachments(writer http.ResponseWriter, request *http.Request) {
+	projectID, ticketID, err := identifiers(request)
+	if err != nil {
+		server.fail(writer, err)
+		return
+	}
+	after, limit, err := page(request)
+	if err != nil {
+		server.fail(writer, err)
+		return
+	}
+	if _, err := readTicket(server.store.database.QueryRowContext(request.Context(), "SELECT "+ticketColumns+" FROM tickets WHERE project_id=? AND id=?", projectID, ticketID)); err != nil {
+		server.fail(writer, err)
+		return
+	}
+	rows, err := server.store.database.QueryContext(request.Context(), "SELECT id,project_id,ticket_id,filename,content_type,bytes,sha256,actor,created_at FROM attachments WHERE ticket_id=? AND id>? ORDER BY id LIMIT ?", ticketID, after, limit)
+	if err != nil {
+		server.fail(writer, err)
+		return
+	}
+	defer rows.Close()
+	items := []Attachment{}
+	for rows.Next() {
+		attachment, err := scanAttachment(rows, nil)
+		if err != nil {
+			server.fail(writer, err)
+			return
+		}
+		attachment.URL = server.attachmentURL(projectID, ticketID, attachment.ID)
+		items = append(items, attachment)
+		after = attachment.ID
+	}
+	if err := rows.Err(); err != nil {
+		server.fail(writer, err)
+		return
+	}
+	server.send(writer, 200, map[string]any{"items": items, "next_cursor": after})
+}
+
+func (server *Server) createAttachment(writer http.ResponseWriter, request *http.Request) {
+	projectID, ticketID, err := identifiers(request)
+	if err != nil {
+		server.fail(writer, err)
+		return
+	}
+	if _, err := readTicket(server.store.database.QueryRowContext(request.Context(), "SELECT "+ticketColumns+" FROM tickets WHERE project_id=? AND id=?", projectID, ticketID)); err != nil {
+		server.fail(writer, err)
+		return
+	}
+	filename := strings.TrimSpace(request.URL.Query().Get("filename"))
+	if filename == "" {
+		filename = "image"
+	}
+	if err := validateAttachmentFilename(filename); err != nil {
+		server.fail(writer, err)
+		return
+	}
+	data, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, AttachmentBytesMax))
+	if err != nil {
+		var oversized *http.MaxBytesError
+		if errors.As(err, &oversized) {
+			server.fail(writer, &problem{413, "Images must be 5 MiB or smaller"})
+			return
+		}
+		server.fail(writer, &problem{400, "Image upload could not be read"})
+		return
+	}
+	contentType, err := attachmentContentType(data)
+	if err != nil {
+		server.fail(writer, err)
+		return
+	}
+	digest := sha256.Sum256(data)
+	label, err := actor(request)
+	if err != nil {
+		server.fail(writer, err)
+		return
+	}
+	value, err := server.store.mutate(request.Context(), projectID, &ticketID, "attachment.created", label, func(transaction *sql.Tx) (any, error) {
+		var count int
+		if err := transaction.QueryRowContext(request.Context(), "SELECT COUNT(*) FROM attachments WHERE ticket_id=?", ticketID).Scan(&count); err != nil {
+			return nil, err
+		}
+		if count >= AttachmentsPerTicketMax {
+			return nil, &problem{409, "A ticket may have at most 8 images; remove one before adding another"}
+		}
+		createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+		result, err := transaction.ExecContext(request.Context(), "INSERT INTO attachments(project_id,ticket_id,filename,content_type,bytes,sha256,data,actor,created_at) VALUES(?,?,?,?,?,?,?,?,?)", projectID, ticketID, filename, contentType, len(data), hex.EncodeToString(digest[:]), data, label, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			return nil, err
+		}
+		return Attachment{ID: id, ProjectID: projectID, TicketID: ticketID, Filename: filename, ContentType: contentType, Bytes: int64(len(data)), SHA256: hex.EncodeToString(digest[:]), Actor: label, CreatedAt: createdAt, URL: server.attachmentURL(projectID, ticketID, id)}, nil
+	})
+	if err != nil {
+		server.fail(writer, err)
+		return
+	}
+	server.send(writer, 201, value)
+}
+
+func (server *Server) attachment(writer http.ResponseWriter, request *http.Request) {
+	projectID, ticketID, attachmentID, err := attachmentIdentifiers(request)
+	if err != nil {
+		server.fail(writer, err)
+		return
+	}
+	var data []byte
+	attachment, err := scanAttachment(server.store.database.QueryRowContext(request.Context(), "SELECT id,project_id,ticket_id,filename,content_type,bytes,sha256,actor,created_at,data FROM attachments WHERE project_id=? AND ticket_id=? AND id=?", projectID, ticketID, attachmentID), &data)
+	if errors.Is(err, sql.ErrNoRows) {
+		server.fail(writer, notFound)
+		return
+	}
+	if err != nil {
+		server.fail(writer, err)
+		return
+	}
+	// The digest identifies these immutable bytes, so conditional requests stay cheap.
+	etag := `"` + attachment.SHA256 + `"`
+	writer.Header().Set("Content-Type", attachment.ContentType)
+	writer.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": attachment.Filename}))
+	writer.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	writer.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	writer.Header().Set("ETag", etag)
+	if request.Header.Get("If-None-Match") == etag {
+		writer.WriteHeader(http.StatusNotModified)
+		return
+	}
+	writer.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	writer.WriteHeader(http.StatusOK)
+	if _, err := writer.Write(data); err != nil {
+		slog.Warn("attachment response interrupted")
+	}
+}
+
+func (server *Server) deleteAttachment(writer http.ResponseWriter, request *http.Request) {
+	projectID, ticketID, attachmentID, err := attachmentIdentifiers(request)
+	if err != nil {
+		server.fail(writer, err)
+		return
+	}
+	label, err := actor(request)
+	if err != nil {
+		server.fail(writer, err)
+		return
+	}
+	value, err := server.store.mutate(request.Context(), projectID, &ticketID, "attachment.deleted", label, func(transaction *sql.Tx) (any, error) {
+		attachment, err := scanAttachment(transaction.QueryRowContext(request.Context(), "SELECT id,project_id,ticket_id,filename,content_type,bytes,sha256,actor,created_at FROM attachments WHERE project_id=? AND ticket_id=? AND id=?", projectID, ticketID, attachmentID), nil)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, notFound
+		}
+		if err != nil {
+			return nil, err
+		}
+		if _, err := transaction.ExecContext(request.Context(), "DELETE FROM attachments WHERE id=?", attachmentID); err != nil {
+			return nil, err
+		}
+		attachment.URL = server.attachmentURL(projectID, ticketID, attachmentID)
+		return attachment, nil
+	})
+	if err != nil {
+		server.fail(writer, err)
+		return
+	}
+	server.send(writer, 200, map[string]any{"deleted": true, "attachment": value})
+}
+
+func attachmentIdentifiers(request *http.Request) (int64, int64, int64, error) {
+	projectID, ticketID, err := identifiers(request)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	attachmentID, err := strconv.ParseInt(request.PathValue("attachment"), 10, 64)
+	if err != nil || attachmentID <= 0 {
+		return 0, 0, 0, &problem{400, "Invalid attachment ID"}
+	}
+	return projectID, ticketID, attachmentID, nil
+}
+
+type attachmentScanner interface {
+	Scan(dest ...any) error
+}
+
+// One column list keeps list, read, and delete in step; data is nil when bytes are not wanted.
+func scanAttachment(row attachmentScanner, data *[]byte) (Attachment, error) {
+	var attachment Attachment
+	fields := []any{&attachment.ID, &attachment.ProjectID, &attachment.TicketID, &attachment.Filename, &attachment.ContentType, &attachment.Bytes, &attachment.SHA256, &attachment.Actor, &attachment.CreatedAt}
+	if data != nil {
+		fields = append(fields, data)
+	}
+	err := row.Scan(fields...)
+	return attachment, err
+}
+
+func (server *Server) attachmentURL(projectID, ticketID, attachmentID int64) string {
+	return fmt.Sprintf("%s/api/projects/%d/tickets/%d/attachments/%d", strings.TrimSuffix(server.origin.String(), "/"), projectID, ticketID, attachmentID)
+}
+
+func validateAttachmentFilename(filename string) error {
+	if !validText(filename, AttachmentFilenameMax, true) || strings.ContainsAny(filename, "/\\") {
+		return &problem{400, "Filename must be 1-120 bytes without slashes or control characters"}
+	}
+	for _, character := range filename {
+		if unicode.IsControl(character) {
+			return &problem{400, "Filename must be 1-120 bytes without slashes or control characters"}
+		}
+	}
+	return nil
+}
+
+// Only decoded raster formats are accepted: SVG and HTML can carry script, and the
+// declared type is derived from the bytes so a client cannot mislabel an upload.
+func attachmentContentType(data []byte) (string, error) {
+	expected := ""
+	switch {
+	case bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")):
+		expected = "png"
+	case bytes.HasPrefix(data, []byte("\xff\xd8\xff")):
+		expected = "jpeg"
+	case bytes.HasPrefix(data, []byte("GIF87a")), bytes.HasPrefix(data, []byte("GIF89a")):
+		expected = "gif"
+	}
+	if expected == "" {
+		return "", &problem{415, "Only PNG, JPEG, or GIF images are supported"}
+	}
+	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || format != expected {
+		return "", &problem{400, "Image data is damaged or does not match its file type"}
+	}
+	if config.Width <= 0 || config.Height <= 0 || config.Width > AttachmentDimensionMax || config.Height > AttachmentDimensionMax {
+		return "", &problem{400, "Images must be between 1 and 12000 pixels per side"}
+	}
+	return "image/" + expected, nil
 }
 
 func (server *Server) events(writer http.ResponseWriter, request *http.Request) {

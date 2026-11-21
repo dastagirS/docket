@@ -279,3 +279,17 @@ Validation: 73 process/browser checks passed using a task-local cached Chrome-fo
 Regression evidence: six Go tests (including eight normalization cases) cover project-label normalization, per-ticket membership against the project vocabulary, unknown-label rejection that names the valid options, list filtering with case folding, blocked removal while a ticket still uses a label, per-ticket and per-project caps, and a schema 3 database migrating to schema 4 with empty labels and its parent links intact. The real browser verifies the project label editor, the ticket picker's `aria-pressed` state, the board filter, a rejected in-use removal that keeps the dialog open and the stored labels unchanged, and 1440×900/390×844 containment. CLI tests cover `--labels`, `--label` filtering, normalized casing, the teaching rejection message, and blocked project removal.
 
 Not certified: physical mobile input, browsers other than the task-local Chrome build, and native macOS execution.
+
+## Terminal-readable CLI diagnostics
+
+`docket update` printed a JSON object into an interactive shell. Failures now print one `docket: …` line when stderr is a terminal and keep the single JSON object when stderr is piped, redirected, or captured; `--json` forces JSON even under a pseudo-terminal.
+
+Regression evidence: a real PTY test asserts the terminal form, the piped JSON form, and the forced JSON form for the same failing command, and fails if a terminal ever receives `{`. The shared terminal probe is the one `project init` already used, so no new dependency was added.
+
+## Image attachments
+
+Uploads are raw request bodies validated by magic bytes and `image.DecodeConfig`; bytes live in SQLite and are served with the detected type, `nosniff`, `default-src 'none'; sandbox`, and an immutable digest-keyed cache.
+
+Regression evidence: four Go tests cover upload/list/fetch/304/delete, metadata and event content, a ticket version that does not move, rejected SVG/HTML/truncated/mislabelled/filename-traversal uploads, the 5 MiB and 8-per-ticket bounds, cross-project 404s, and a `VACUUM INTO` backup that restores the exact bytes. The real browser test uploads through the same fetch path the picker uses, requires the thumbnail to decode (`naturalWidth > 0`), saves and checks the rendered description image, rejects a text file without storing it, deletes the image and confirms the reference is dropped, and captures 1440-wide screenshots. CLI tests upload with `--file`, read the bytes back through the returned URL, and confirm the ticket version is unchanged. Markdown tests prove images render only for that ticket's own attachment paths and that absolute, data, `javascript:`, and raw-HTML image sources do not.
+
+Validation: `go vet`, `go test -race`, Docker `make test`, `make security` (no vulnerabilities), `make verify-portable`, frontend check/tests/build, and 54 CLI/skill/installer/workflow/release checks passed. The browser suite passed 20/20 on two full runs; one earlier full run failed `board drag: native status moves`, which passed immediately in isolation and on both later full runs, so it is recorded as an observed flake in the drag harness rather than a regression. Task-local Chrome-for-Testing 127 and scratch binaries/databases/screenshots were removed after review; cached archives and live services were untouched.

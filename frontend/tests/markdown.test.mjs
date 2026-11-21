@@ -13,6 +13,20 @@ test("descriptions render Markdown formatting without enabling embedded HTML or 
   assert.doesNotMatch(output, /<(?:script|img|iframe|svg)\b/i);
 });
 
+test("only a ticket's own attachment paths render as images", () => {
+  const own = "/api/projects/1/tickets/2/attachments/3";
+  const rendered = renderDescription(`![shot](${own})`, [own]);
+  assert.match(rendered, /<img src="\/api\/projects\/1\/tickets\/2\/attachments\/3"/);
+  assert.match(rendered, /alt="shot"/);
+  assert.match(rendered, /loading="lazy"/);
+  assert.doesNotMatch(renderDescription(`![shot](${own})`), /<img/, "images need an explicit allow-list");
+  for (const source of [`![x](/api/projects/1/tickets/2/attachments/9)`, `![x](https://evil.test${own})`, "![x](data:image/png;base64,eA==)", `![x](javascript:alert(1))`]) {
+    assert.doesNotMatch(renderDescription(source, [own]), /<img/, source);
+  }
+  assert.doesNotMatch(renderDescription(`<img src="${own}">`, [own]), /<img/, "raw HTML stays escaped");
+  assert.doesNotMatch(renderDescription(`![a" onerror="alert(1)](${own})`, [own]), /onerror="/);
+});
+
 test("Markdown rejects active URL schemes and escapes HTML, attributes, and code fences", () => {
   for (const source of [
     '[x](javascript:alert(1))', '[x](JaVaScRiPt:alert(1))', '[x](vbscript:msgbox(1))',

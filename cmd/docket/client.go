@@ -15,7 +15,9 @@ import (
 )
 
 const (
-	requestBytesMax        = 64 * 1024
+	requestBytesMax = 64 * 1024
+	// Mirrors the server's per-image bound; the server revalidates every upload.
+	attachmentBytesMax     = 5 * 1024 * 1024
 	responseBytesMax       = 16 * 1024 * 1024
 	responseHeaderBytesMax = 16 * 1024
 	requestTimeoutDefault  = 10 * time.Second
@@ -44,14 +46,15 @@ type cliFailure struct {
 func (failure *cliFailure) Error() string { return failure.Message }
 
 type apiCommand struct {
-	server  string
-	method  string
-	path    string
-	body    []byte
-	version int64
-	actor   string
-	timeout time.Duration
-	binding *folderBinding
+	server    string
+	method    string
+	path      string
+	body      []byte
+	mediaType string
+	version   int64
+	actor     string
+	timeout   time.Duration
+	binding   *folderBinding
 }
 
 func (command apiCommand) request() ([]byte, error) {
@@ -92,7 +95,11 @@ func (command apiCommand) requestOnce() ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("Invalid HTTP request configuration")
 	}
-	request.Header.Set("Content-Type", "application/json")
+	mediaType := command.mediaType
+	if mediaType == "" {
+		mediaType = "application/json"
+	}
+	request.Header.Set("Content-Type", mediaType)
 	request.Header.Set("Accept", "application/json")
 	if command.actor != "" {
 		request.Header.Set("X-Docket-Actor", command.actor)

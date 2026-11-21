@@ -8,6 +8,9 @@ export const LABEL_BYTES_MAX = 32;
 export const STATUS_BYTES_MAX = 100;
 export const ASSIGNEE_BYTES_MAX = 100;
 export const COMMENT_CHARACTERS_MAX = 2000;
+export const ATTACHMENT_BYTES_MAX = 5 * 1024 * 1024;
+export const ATTACHMENTS_MAX = 8;
+export const ATTACHMENT_TYPES = ["image/png", "image/jpeg", "image/gif"];
 export const DEFAULT_STATUSES = ["To Do", "In Progress", "Blocked", "In Review", "Done"];
 const REQUEST_TIMEOUT_MS = 10000;
 
@@ -41,6 +44,18 @@ export interface Comment {
   body: string;
   actor: string;
   created_at: string;
+}
+export interface Attachment {
+  id: number;
+  project_id: number;
+  ticket_id: number;
+  filename: string;
+  content_type: string;
+  bytes: number;
+  sha256: string;
+  actor: string;
+  created_at: string;
+  url: string;
 }
 export interface ChangeEvent {
   id: number;
@@ -84,6 +99,11 @@ export function readTicket(value: unknown): Ticket {
   if (typeof item.archived !== "boolean") throw new Error("Invalid ticket archive state");
   return { id: integer(item.id), project_id: integer(item.project_id), title: text(item.title), description: text(item.description), status: text(item.status), version: integer(item.version), created_at: text(item.created_at), updated_at: text(item.updated_at), archived: item.archived, assignee: text(item.assignee), parent_id: item.parent_id === null ? null : integer(item.parent_id), labels: labelList(item.labels, TICKET_LABELS_MAX) };
 }
+export function readAttachment(value: unknown): Attachment {
+  const item = record(value);
+  if (!ATTACHMENT_TYPES.includes(text(item.content_type))) throw new Error("Invalid server attachment type");
+  return { id: integer(item.id), project_id: integer(item.project_id), ticket_id: integer(item.ticket_id), filename: text(item.filename), content_type: text(item.content_type), bytes: integer(item.bytes), sha256: text(item.sha256), actor: text(item.actor), created_at: text(item.created_at), url: text(item.url) };
+}
 export function readComment(value: unknown): Comment {
   const item = record(value);
   return { id: integer(item.id), ticket_id: integer(item.ticket_id), body: text(item.body), actor: text(item.actor), created_at: text(item.created_at) };
@@ -116,4 +136,9 @@ export async function api<T>(path: string, options: RequestInit, read: (value: u
 }
 export function projectPath(projectID: number): string { return `/api/projects/${projectID}`; }
 export function ticketPath(projectID: number, ticketID: number): string { return `${projectPath(projectID)}/tickets/${ticketID}`; }
+export function attachmentsPath(projectID: number, ticketID: number): string { return `${ticketPath(projectID, ticketID)}/attachments`; }
+// Attachment bytes are the raw request body; the server derives the type from the bytes.
+export function uploadAttachment(projectID: number, ticketID: number, file: File): Promise<Attachment> {
+  return api(`${attachmentsPath(projectID, ticketID)}?filename=${encodeURIComponent(file.name || "image")}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file }, readAttachment);
+}
 export function dateLabel(value: string): string { return new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }); }

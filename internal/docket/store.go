@@ -18,23 +18,27 @@ import (
 )
 
 const (
-	ProjectsMax          = 128
-	TicketsMax           = 10000
-	EventsMax            = 250000
-	PageSizeMax          = 100
-	StatusesMax          = 12
-	LabelsMax            = 32
-	TicketLabelsMax      = 8
-	LabelBytesMax        = 32
-	NameBytesMax         = 100
-	TitleBytesMax        = 200
-	TextBytesMax         = 16000
-	CommentCharactersMax = 2000
-	ActorBytesMax        = 80
-	AssigneeBytesMax     = 100
-	databasePagesMax     = 131072 // 512 MiB at the required 4096-byte page size; never silently discard history.
-	queryTimeout         = 5 * time.Second
-	schemaVersion        = 4
+	ProjectsMax             = 128
+	TicketsMax              = 10000
+	EventsMax               = 250000
+	PageSizeMax             = 100
+	StatusesMax             = 12
+	LabelsMax               = 32
+	TicketLabelsMax         = 8
+	LabelBytesMax           = 32
+	NameBytesMax            = 100
+	TitleBytesMax           = 200
+	TextBytesMax            = 16000
+	CommentCharactersMax    = 2000
+	ActorBytesMax           = 80
+	AssigneeBytesMax        = 100
+	AttachmentBytesMax      = 5 * 1024 * 1024
+	AttachmentsPerTicketMax = 8
+	AttachmentFilenameMax   = 120
+	AttachmentDimensionMax  = 12000
+	databasePagesMax        = 131072 // 512 MiB at the required 4096-byte page size; never silently discard history.
+	queryTimeout            = 5 * time.Second
+	schemaVersion           = 5
 )
 
 var defaultStatuses = []string{"To Do", "In Progress", "Blocked", "In Review", "Done"}
@@ -63,6 +67,20 @@ type Ticket struct {
 	Assignee    string   `json:"assignee"`
 	ParentID    *int64   `json:"parent_id"`
 	Labels      []string `json:"labels"`
+}
+
+// Attachment metadata. Image bytes stay in the table but never travel in JSON or events.
+type Attachment struct {
+	ID          int64  `json:"id"`
+	ProjectID   int64  `json:"project_id"`
+	TicketID    int64  `json:"ticket_id"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	Bytes       int64  `json:"bytes"`
+	SHA256      string `json:"sha256"`
+	Actor       string `json:"actor"`
+	CreatedAt   string `json:"created_at"`
+	URL         string `json:"url"`
 }
 
 type Comment struct {
@@ -191,6 +209,26 @@ ALTER TABLE tickets ADD COLUMN labels TEXT NOT NULL DEFAULT '[]' CHECK(json_vali
 PRAGMA user_version=4;`); err != nil {
 			return err
 		}
+		version = 4
+	}
+	if version == 4 {
+		if _, err := transaction.ExecContext(ctx, `
+CREATE TABLE attachments (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ project_id INTEGER NOT NULL REFERENCES projects(id),
+ ticket_id INTEGER NOT NULL REFERENCES tickets(id),
+ filename TEXT NOT NULL,
+ content_type TEXT NOT NULL,
+ bytes INTEGER NOT NULL CHECK(bytes > 0),
+ sha256 TEXT NOT NULL,
+ data BLOB NOT NULL,
+ actor TEXT NOT NULL,
+ created_at TEXT NOT NULL
+);
+CREATE INDEX attachments_ticket ON attachments(ticket_id, id);
+PRAGMA user_version=5;`); err != nil {
+			return err
+		}
 		return transaction.Commit()
 	}
 	_, err = transaction.ExecContext(ctx, `
@@ -239,7 +277,20 @@ CREATE TABLE events (
 );
 CREATE INDEX events_project ON events(project_id, id);
 CREATE INDEX events_ticket ON events(ticket_id, id);
-PRAGMA user_version=4;`)
+CREATE TABLE attachments (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ project_id INTEGER NOT NULL REFERENCES projects(id),
+ ticket_id INTEGER NOT NULL REFERENCES tickets(id),
+ filename TEXT NOT NULL,
+ content_type TEXT NOT NULL,
+ bytes INTEGER NOT NULL CHECK(bytes > 0),
+ sha256 TEXT NOT NULL,
+ data BLOB NOT NULL,
+ actor TEXT NOT NULL,
+ created_at TEXT NOT NULL
+);
+CREATE INDEX attachments_ticket ON attachments(ticket_id, id);
+PRAGMA user_version=5;`)
 	if err != nil {
 		return err
 	}

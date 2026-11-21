@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,6 +35,7 @@ Usage:
   docket ticket list|create [--project PROJECT] [options]
   docket ticket get|update|archive|restore|history ID [--project PROJECT] [options]
   docket comment list|add TICKET [--project PROJECT] [options]
+  docket attachment list|add TICKET [--project PROJECT] [options]
   docket events list [--project PROJECT] [options]
   docket serve [server options]
 
@@ -223,6 +225,20 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 			return command, "", errors.New("Use events list")
 		}
 		list = true
+	case "attachment":
+		needsID = true
+		switch action {
+		case "add":
+			write = true
+			command.method = http.MethodPost
+		case "list":
+			list = true
+		case "delete":
+			write = true
+			command.method = http.MethodDelete
+		default:
+			return command, "", errors.New("Use attachment add, attachment list, or attachment delete")
+		}
 	default:
 		return command, "", errors.New("Unknown command; use docket --help")
 	}
@@ -239,16 +255,25 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 	flags.SetOutput(io.Discard)
 	flags.Usage = func() {}
 	registerClientFlags(flags, &command)
-	var projectID, version, after, parentID int64
+	var projectID, version, after, parentID, attachmentID int64
 	var limit int
-	var query, inputPath, labelFilter string
+	var query, inputPath, labelFilter, filePath, filename string
 	var archived bool
 	fields := map[string]*string{}
-	if noun == "ticket" || noun == "comment" || noun == "events" {
+	if noun == "ticket" || noun == "comment" || noun == "events" || noun == "attachment" {
 		flags.Int64Var(&projectID, "project", 0, "Project ID; otherwise look up this folder in ~/.docket/registry.json")
 	}
-	if write && action != "create" {
+	if write && action != "create" && noun != "attachment" {
 		flags.Int64Var(&version, "version", 0, "Required current record version; never refreshed automatically")
+	}
+	if noun == "attachment" {
+		if action == "add" {
+			flags.StringVar(&filePath, "file", "", "PNG, JPEG, or GIF file, or - for stdin; 5 MiB max")
+			flags.StringVar(&filename, "filename", "", "Displayed filename; defaults to the file's base name")
+		}
+		if action == "delete" {
+			flags.Int64Var(&attachmentID, "attachment", 0, "Attachment ID to delete; see attachment list")
+		}
 	}
 	if list {
 		flags.Int64Var(&after, "after", 0, "Cursor from a previous page")
@@ -260,7 +285,7 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 			flags.StringVar(&labelFilter, "label", "", "Filter tickets carrying this project label")
 		}
 	}
-	if write && action != "archive" && action != "restore" {
+	if write && action != "archive" && action != "restore" && noun != "attachment" {
 		flags.StringVar(&inputPath, "input", "", "JSON object file, or - for stdin; cannot combine with field flags")
 		var names []string
 		switch noun {
@@ -316,7 +341,7 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 	if needsID && identifier <= 0 {
 		return command, "", errors.New("A positive record ID is required before flags")
 	}
-	if noun == "ticket" || noun == "comment" || noun == "events" {
+	if noun == "ticket" || noun == "comment" || noun == "events" || noun == "attachment" {
 		if !seen["project"] {
 			binding, _, err := discoverBinding()
 			if err != nil {
@@ -356,7 +381,7 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 			command.server = origin
 		}
 	}
-	if write && action != "create" && version <= 0 {
+	if write && action != "create" && noun != "attachment" && version <= 0 {
 		return command, "", errors.New("A positive --version from a previous read is required")
 	}
 	if seen["parent"] && parentID <= 0 {
@@ -384,6 +409,12 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 				if noun == "comment" {
 					command.path += "/comments"
 				}
+				if noun == "attachment" {
+					command.path += "/attachments"
+					if action == "delete" {
+						command.path += "/" + strconv.FormatInt(attachmentID, 10)
+					}
+				}
 				if action == "history" {
 					command.path += "/history"
 				}
@@ -406,7 +437,31 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 		}
 		command.path += "?" + parameters.Encode()
 	}
-	if write {
+	if noun == "attachment" && action == "add" {
+		if !seen["file"] || filePath == "" {
+			return command, "", errors.New("Supply --file with a PNG, JPEG, or GIF image")
+		}
+		payload, err := readBoundedInput(filePath, input, command.timeout, attachmentBytesMax, "Image", "5 MiB")
+		if err != nil {
+			return command, "", err
+		}
+		if seen["filename"] {
+			if filename == "" || strings.ContainsAny(filename, "/\\") {
+				return command, "", errors.New("Filename must be nonempty and contain no slashes")
+			}
+		} else if filePath != "-" {
+			filename = filepath.Base(filePath)
+		} else {
+			filename = "image"
+		}
+		command.mediaType = "application/octet-stream"
+		command.body = payload
+		command.path += "?" + url.Values{"filename": {filename}}.Encode()
+	}
+	if noun == "attachment" && action == "delete" && attachmentID <= 0 {
+		return command, "", errors.New("A positive --attachment ID is required")
+	}
+	if write && noun != "attachment" {
 		body := map[string]json.RawMessage{}
 		for name, value := range fields {
 			if !seen[name] {
@@ -442,7 +497,7 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 			if inputPath == "" || len(body) > 0 {
 				return command, "", errors.New("Use either --input or field flags, not both")
 			}
-			payload, err := readCommandInput(inputPath, input, command.timeout)
+			payload, err := readBoundedInput(inputPath, input, command.timeout, requestBytesMax, "JSON", "64 KiB")
 			if err != nil {
 				return command, "", err
 			}
@@ -465,7 +520,7 @@ func parseCommand(arguments []string, input io.Reader) (apiCommand, string, erro
 	return command, "", nil
 }
 
-func readCommandInput(path string, input io.Reader, timeout time.Duration) (payload []byte, result error) {
+func readBoundedInput(path string, input io.Reader, timeout time.Duration, limit int, label, size string) (payload []byte, result error) {
 	if timeout <= 0 || timeout > requestTimeoutMax {
 		return nil, errors.New("Timeout must be positive and at most 1m")
 	}
@@ -474,16 +529,16 @@ func readCommandInput(path string, input io.Reader, timeout time.Duration) (payl
 		// Nonblocking open lets us reject FIFOs instead of hanging before the regular-file check.
 		file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 		if err != nil {
-			return nil, errors.New("Cannot open JSON input file")
+			return nil, errors.New("Cannot open " + label + " input file")
 		}
 		defer func() {
 			if err := file.Close(); err != nil {
-				result = errors.Join(result, errors.New("Cannot close JSON input file"))
+				result = errors.Join(result, errors.New("Cannot close "+label+" input file"))
 			}
 		}()
 		info, err := file.Stat()
 		if err != nil || !info.Mode().IsRegular() {
-			return nil, errors.New("JSON input must be a regular file or - for stdin")
+			return nil, errors.New(label + " input must be a regular file or - for stdin")
 		}
 		reader = file
 	}
@@ -495,7 +550,7 @@ func readCommandInput(path string, input io.Reader, timeout time.Duration) (payl
 	// One bounded worker allows a timeout even for stdin descriptors without deadline support.
 	// The buffer lets it finish after timeout; a CLI process runs only one command before exiting.
 	go func() {
-		data, err := io.ReadAll(io.LimitReader(reader, requestBytesMax+1))
+		data, err := io.ReadAll(io.LimitReader(reader, int64(limit)+1))
 		completed <- inputResult{data, err}
 	}()
 	timer := time.NewTimer(timeout)
@@ -503,14 +558,14 @@ func readCommandInput(path string, input io.Reader, timeout time.Duration) (payl
 	select {
 	case read := <-completed:
 		if read.err != nil {
-			return nil, errors.New("Cannot read JSON input")
+			return nil, errors.New("Cannot read " + label + " input")
 		}
 		payload = read.payload
 	case <-timer.C:
-		return nil, &cliFailure{Exit: exitUsage, Code: "input_timeout", Message: "JSON input did not finish within --timeout; close stdin after sending the body. No request was sent."}
+		return nil, &cliFailure{Exit: exitUsage, Code: "input_timeout", Message: label + " input did not finish within --timeout; close stdin after sending the body. No request was sent."}
 	}
-	if len(payload) > requestBytesMax {
-		return nil, errors.New("JSON input exceeds 64 KiB")
+	if len(payload) > limit {
+		return nil, errors.New(label + " input exceeds " + size)
 	}
 	return payload, nil
 }

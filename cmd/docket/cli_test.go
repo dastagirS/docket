@@ -96,7 +96,7 @@ func TestCLIJSONInputBoundsAndUTF8(t *testing.T) {
 	if _, _, err := parseCommand([]string{"ticket", "create", "--project", "1", "--input", path}, strings.NewReader("")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readCommandInput(filepath.Dir(path), strings.NewReader(""), requestTimeoutDefault); err == nil {
+	if _, err := readBoundedInput(filepath.Dir(path), strings.NewReader(""), requestTimeoutDefault, requestBytesMax, "JSON", "64 KiB"); err == nil {
 		t.Fatal("Directory accepted as JSON input")
 	}
 }
@@ -264,7 +264,7 @@ func TestCLIInputRejectsFIFOWithoutBlocking(t *testing.T) {
 	if err := syscall.Mkfifo(path, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readCommandInput(path, strings.NewReader(""), requestTimeoutDefault); err == nil {
+	if _, err := readBoundedInput(path, strings.NewReader(""), requestTimeoutDefault, requestBytesMax, "JSON", "64 KiB"); err == nil {
 		t.Fatal("FIFO input must not be opened as a blocking regular file")
 	}
 }

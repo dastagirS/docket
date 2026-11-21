@@ -84,6 +84,18 @@ docket events list --project "$project_id" --server "$docket_url" --after "$curs
 
 New comments must be nonblank and at most 2,000 Unicode code points. Existing longer comments remain readable. A comment advances the ticket's version, returned as `ticket_version`. Event reads do not acknowledge anything or persist a cursor. They do not authorize work, start agents, or update the separate Pi integration's delivery/ownership state.
 
+## Images
+
+```sh
+docket attachment add "$ticket_id" --project "$project_id" --server "$docket_url" \
+  --file ./failure.png --filename failure.png
+docket attachment list "$ticket_id" --project "$project_id" --server "$docket_url"
+docket attachment delete "$ticket_id" --project "$project_id" --server "$docket_url" \
+  --attachment "$attachment_id"
+```
+
+The file bytes are the raw request body; nothing is base64-encoded. PNG, JPEG, or GIF only, at most 5 MiB each, 8 per ticket, and a 12000-pixel side bound. `--file -` reads stdin, so `curl -sS "$url" | docket attachment add ...` works. Images are stored inside the database, so one backup file stays complete. Uploading or deleting does not change the ticket version; a description that references an image still needs a normal versioned `ticket update`. The returned `url` is the target for a Markdown image reference: alt text in square brackets, then that URL in parentheses.
+
 ## Paging and filters
 
 All list/history commands accept `--after` (nonnegative cursor) and `--limit` (1–100). Each call returns `{ "items": [...], "next_cursor": ... }` in ascending ID order. A short page means caught up; an empty page retains the supplied cursor.
